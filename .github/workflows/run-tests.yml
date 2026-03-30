@@ -36,7 +36,7 @@ jobs:
           poetry env info  # display poetry's env info for debugging
           poetry install  --with test
       - name: Run Tests
-        run: poetry run python {{tom_app}}/tests/run_tests.py
+        run: poetry run python tom_jpl/tests/run_tests.py
 
   publish_coverage:
     runs-on: ubuntu-latest
@@ -51,7 +51,7 @@ jobs:
           python -m pip install "poetry>=2.0,<3.0"
           poetry install --with coverage,lint
       - name: Run Tests
-        run: poetry run coverage run --include={{tom_app}}/{{app_code.py}} {{tom_app}}/tests/run_tests.py
+        run: poetry run coverage run --include=tom_jpl/jpl.py tom_jpl/tests/run_tests.py
       - name: Report Coverage
         run: poetry run coveralls
         env:

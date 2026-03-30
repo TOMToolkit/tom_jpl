@@ -7,7 +7,7 @@ import os
 import django
 from django.conf import settings
 
-APP_NAME = 'tom_app'  # the stand-alone app we are testing
+APP_NAME = 'tom_jpl'  # the stand-alone app we are testing
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), APP_NAME))
 

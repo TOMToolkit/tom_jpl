@@ -1,11 +1,11 @@
 [project]
-name = "tom-app"
-description = "App description here"
+name = "tom-jpl"
+description = "TOMToolkit's JPL data service app"
 authors = [
-    {name = "Your Name",email = "you@example.com"}
+    {name = "Joey Chatelain",email = "jchatelain@lco.global"}
 ]
 maintainers = [
-    {name = "Joey Chatelain", email = "jchate6@gmail.com"},
+    {name = "Joey Chatelain", email = "jchatelain@lco.global"},
     {name = "William Lindstrom", email = "llindstrom@lco.global"},
     {name = "Rachel Street", email = "rstreet@lco.global"},
 ]

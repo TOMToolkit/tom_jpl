@@ -25,7 +25,7 @@ jobs:
           poetry env info  # display poetry's env info for debugging
           poetry install  --with test
       - name: Run Tests
-        run: poetry run python {{tom_app}}/tests/run_tests.py
+        run: poetry run python tom_jpl/tests/run_tests.py
 
   create_release:
     runs-on: ubuntu-latest
@@ -36,5 +36,5 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: ${{ github.ref }}
-        release_name: {{tom_app}} ${{ github.ref }}
+        release_name: tom_jpl ${{ github.ref }}
         draft: true
