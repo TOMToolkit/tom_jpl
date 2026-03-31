@@ -17,7 +17,7 @@ class ScoutForm(BaseQueryForm):
     geo_score_max = forms.IntegerField(required=False, initial=5, min_value=0, max_value=100,
                                        label='Maximum GEO digest score (0..100)',
                                        help_text='Maximum Geocentric digest score (0..100) permissible')
-    help_text = 'Rating to character the chances of an Earth impact '
+    help_text = 'Rating to characterize the chances of an Earth impact '
     help_text += '(0=negligible, 1=small, 2=modest, 3=moderate, 4=elevated)'
     impact_rating_min = forms.IntegerField(required=False, min_value=0, max_value=4,
                                            label='Minimum impact rating (0..4)',
