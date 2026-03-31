@@ -8,6 +8,7 @@ import requests
 
 from tom_dataservices.dataservices import DataService
 from tom_targets.models import Target
+from tom_jpl import __version__
 from tom_jpl.forms import ScoutForm
 from tom_jpl.models import ScoutDetail
 
@@ -24,6 +25,8 @@ class ScoutDataService(DataService):
     query_results_table = 'tom_jpl/partials/scout_query_results_table.html'
     expected_signature = {'source': 'NASA/JPL Scout API', 'version': '1.3'}
     total_results = None
+    app_version = __version__
+    app_link = 'https://github.com/TOMToolkit/tom_jpl'
 
     # Gaussian gravitational constant
     _k = degrees(sqrt(GM_sun.value) * au.value**-1.5 * 86400.0)
