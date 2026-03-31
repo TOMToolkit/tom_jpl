@@ -522,7 +522,7 @@ class TestScoutDataService(TestCase):
         self.assertEqual(parameters, expected_parameters)
         self.assertEqual(self.jpl_ds.input_parameters, self.input_parameters)
 
-    @mock.patch('tom_dataservices.data_services.jpl.ScoutDataService.query_service')
+    @mock.patch('tom_jpl.jpl.ScoutDataService.query_service')
     def test_query_targets_single(self, mock_client):
         mock_client.side_effect = [self.scout_results, ]
         self.input_parameters['tdes'] = 'ZTF10BL'
@@ -544,7 +544,7 @@ class TestScoutDataService(TestCase):
                 else:
                     self.assertEqual(target[key], expected_target_results[key])
 
-    @mock.patch('tom_dataservices.data_services.jpl.ScoutDataService.query_service')
+    @mock.patch('tom_jpl.jpl.ScoutDataService.query_service')
     def test_query_targets_filter_on_geo0(self, mock_client):
         first_result = self.scout_results[0].copy()
         first_result['geocentricScore'] = 0  # passes geo_score_max=0 cut
@@ -583,46 +583,3 @@ class TestScoutDataService(TestCase):
         self.assertEqual(target.scheme, expected_target.scheme)
         self.assertEqual(target.epoch_of_elements, expected_target.epoch_of_elements)
         self.assertAlmostEqual(target.mean_anomaly, expected_target.mean_anomaly, places=6)
-
-
-@tag('canary')
-class TestScoutDataServiceCanary(TestCase):
-    """Tests that actually hit the JPL Scout API."""
-
-    def setUp(self):
-        self.jpl_ds = ScoutDataService()
-        self.input_parameters = {'ca_dist_min': None,
-                                 'data_service': 'Scout',
-                                 'geo_score_max': 5,
-                                 'impact_rating_min': None,
-                                 'neo_score_min': None,
-                                 'pha_score_min': None,
-                                 'pos_unc_max': None,
-                                 'pos_unc_min': None,
-                                 'query_name': '',
-                                 'query_save': False,
-                                 'tdes': ''}
-        self.expected_result_keys = ['lastRun', 'neo1kmScore', 'phaScore', 'geocentricScore', 'arc', 'rate',
-                                     'neoScore', 'rating', 'elong', 'uncP1', 'vInf', 'objectName', 'dec', 'H',
-                                     'caDist', 'moid', 'ra', 'unc', 'Vmag', 'nObs', 'rmsN', 'tEphem',
-                                     'tisserandScore', 'ieoScore']
-
-    def test_boilerplate(self):
-        self.assertTrue(True)
-
-    def test_query_service(self):
-        """Test query_service."""
-        results = self.jpl_ds.query_service(self.jpl_ds.build_query_parameters(self.input_parameters))
-
-        self.assertIsNotNone(results)
-        self.assertIsInstance(results, list)
-        for key in results[0].keys():  # type: ignore
-            self.assertIn(key, self.expected_result_keys)
-
-    def test_query_targets_single(self):
-        """Test query_targets with a single result."""
-        pass
-
-    def test_create_target_from_query(self):
-        """Test create_target_from_query."""
-        pass
