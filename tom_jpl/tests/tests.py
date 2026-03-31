@@ -1,7 +1,7 @@
 from datetime import datetime
 from dateutil.tz import tzutc
 
-from django.test import tag, SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase
 from unittest import mock
 
 from tom_jpl.jpl import ScoutDataService
@@ -304,13 +304,13 @@ class TestQueryTargetsFiltering(TestCase):
             'tdes': 'ZTF10BL',
         }
 
-    @mock.patch('tom_dataservices.data_services.jpl.ScoutDataService.query_service')
+    @mock.patch('tom_jpl.jpl.ScoutDataService.query_service')
     def test_returns_empty_list_when_query_service_returns_none(self, mock_qs):
         mock_qs.return_value = None
         targets = self.ds.query_targets(self.base_input_parameters)
         self.assertEqual(targets, [])
 
-    @mock.patch('tom_dataservices.data_services.jpl.ScoutDataService.query_service')
+    @mock.patch('tom_jpl.jpl.ScoutDataService.query_service')
     def test_result_excluded_by_geocentric_score_filter(self, mock_qs):
         """A result with geocentricScore > geo_score_max should be excluded."""
         result = make_result_with_orbits({'geocentricScore': 6})  # fails geo_score_max=5
@@ -319,7 +319,7 @@ class TestQueryTargetsFiltering(TestCase):
         targets = self.ds.query_targets(self.base_input_parameters)
         self.assertEqual(targets, [])
 
-    @mock.patch('tom_dataservices.data_services.jpl.ScoutDataService.query_service')
+    @mock.patch('tom_jpl.jpl.ScoutDataService.query_service')
     def test_result_included_when_all_filters_pass(self, mock_qs):
         """A result that satisfies all default filters should be included."""
         result = make_result_with_orbits({'geocentricScore': 1})
@@ -329,7 +329,7 @@ class TestQueryTargetsFiltering(TestCase):
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0]['objectName'], 'ZTF10BL')
 
-    @mock.patch('tom_dataservices.data_services.jpl.ScoutDataService.query_service')
+    @mock.patch('tom_jpl.jpl.ScoutDataService.query_service')
     def test_multiple_results_partial_filter(self, mock_qs):
         """Only results passing all filters should be returned from a multi-result response."""
         passing = make_result_with_orbits({'objectName': 'ZTF10BL', 'geocentricScore': 1})
