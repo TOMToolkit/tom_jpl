@@ -237,7 +237,7 @@ class ScoutDataService(DataService):
 
         target = Target(
             name=target_results['objectName'],
-            type='NON-SIDEREAL',
+            type=Target.NON_SIDEREAL,
             scheme='MPC_MINOR_PLANET',
             arg_of_perihelion=float(elements['w']),
             lng_asc_node=float(elements['om']),
