@@ -21,7 +21,7 @@ class ScoutDataService(DataService):
     name = 'Scout2'
     app_version = '0.0.4'
     info_url = 'https://cneos.jpl.nasa.gov/scout/intro.html'
-    query_results_table = 'tom_dataservices/scout/partials/scout_query_results_table.html'
+    query_results_table = 'tom_jpl/partials/scout_query_results_table.html'
     expected_signature = {'source': 'NASA/JPL Scout API', 'version': '1.3'}
     total_results = None
 
