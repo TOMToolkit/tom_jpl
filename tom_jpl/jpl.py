@@ -293,7 +293,7 @@ class ScoutDataService(DataService):
 
     def to_target(self, target_result=None, **kwargs):
         target = super().to_target(target_result, **kwargs)
-        if target and target_result:
+        if target and target_result and 'scout_detail' in target_result:
             scout_detail, created = ScoutDetail.objects.get_or_create(target=target, **target_result['scout_detail'])
             print(scout_detail)
 

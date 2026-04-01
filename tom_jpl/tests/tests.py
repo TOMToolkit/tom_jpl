@@ -1,8 +1,9 @@
 from datetime import datetime
 from dateutil.tz import tzutc
 
-from django.test import SimpleTestCase, TestCase
-from unittest import mock, skipIf
+from django.test import SimpleTestCase, TestCase, RequestFactory
+from django.contrib.auth.models import AnonymousUser
+from unittest import mock
 
 from tom_jpl.jpl import ScoutDataService, ScoutDetail
 # from tom_dataservices.tests.factories import scout_resultsFactory
@@ -499,6 +500,7 @@ class TestScoutDataService(TestCase):
                          'abs_mag': 25.402927,
                          'slope': 0.15}
         self.test_target = Target.objects.create(**target_params)
+        self.factory = RequestFactory()
 
     def test_build_query_parameters_no_target(self):
         """
@@ -574,7 +576,7 @@ class TestScoutDataService(TestCase):
     def test_create_target_from_query(self):
         expected_target = self.test_target
 
-        target = self.jpl_ds.to_target(self.scout_results[0])
+        target = self.jpl_ds.create_target_from_query(self.scout_results[0])
 
         self.assertEqual(target.name, expected_target.name)
         self.assertEqual(target.type, expected_target.type)
@@ -584,14 +586,53 @@ class TestScoutDataService(TestCase):
         self.assertEqual(target.epoch_of_elements, expected_target.epoch_of_elements)
         self.assertAlmostEqual(target.mean_anomaly, expected_target.mean_anomaly, places=6)
 
+        self.assertEqual(Target.objects.count(), 1)
+
+    def test_to_target(self):
+        expected_target = self.test_target
+        self.test_target.delete()  # delete the existing target to test creation of new one
+        request = self.factory.get('/')
+        request.user = AnonymousUser()
+
+        with mock.patch('tom_dataservices.dataservices.messages'):
+            target_data = self.scout_results[0].copy()
+            scout_detail = self.jpl_ds._parse_detail_data(target_data)
+            target_data['scout_detail'] = scout_detail
+            target = self.jpl_ds.to_target(target_data, request=request)
+
+        self.assertEqual(Target.objects.count(), 1)
+        self.assertEqual(target.name, expected_target.name)
+        self.assertEqual(target.type, expected_target.type)
+        self.assertEqual(target.ra, expected_target.ra)
+        self.assertEqual(target.dec, expected_target.dec)
+        self.assertEqual(target.scheme, expected_target.scheme)
+        self.assertEqual(target.epoch_of_elements, expected_target.epoch_of_elements)
+        self.assertAlmostEqual(target.mean_anomaly, expected_target.mean_anomaly, places=6)
+
         self.assertEqual(ScoutDetail.objects.count(), 1)
+        self.assertEqual(target.scout_detail.num_obs, scout_detail['num_obs'])
+        self.assertEqual(target.scout_detail.neo_score, scout_detail['neo_score'])
+        self.assertEqual(target.scout_detail.pha_score, scout_detail['pha_score'])
+        self.assertEqual(target.scout_detail.geocentric_score, scout_detail['geocentric_score'])
+        self.assertEqual(target.scout_detail.impact_rating, scout_detail['impact_rating'])
+        self.assertEqual(target.scout_detail.ca_dist, scout_detail['ca_dist'])
+        self.assertEqual(target.scout_detail.arc, scout_detail['arc'])
+        self.assertEqual(target.scout_detail.rms, scout_detail['rms'])
+        self.assertEqual(target.scout_detail.uncertainty, scout_detail['uncertainty'])
+        self.assertEqual(target.scout_detail.uncertainty_p1, scout_detail['uncertainty_p1'])
+        self.assertEqual(target.scout_detail.last_run, scout_detail['last_run'])
 
     def test_update_existing_target_from_query(self):
         """Test that create_target_from_query updates an existing Target rather than creating a new one."""
         existing_target = self.test_target
         self.assertEqual(Target.objects.count(), 1)
+        request = self.factory.get('/')
 
-        target = self.jpl_ds.to_target(self.scout_results[0])
+        with mock.patch('tom_dataservices.dataservices.messages'):
+            target_data = self.scout_results[0].copy()
+            scout_detail = self.jpl_ds._parse_detail_data(target_data)
+            target_data['scout_detail'] = scout_detail
+            target = self.jpl_ds.to_target(target_data, request=request)
 
         # No new Target should have been created
         self.assertEqual(Target.objects.count(), 1)
