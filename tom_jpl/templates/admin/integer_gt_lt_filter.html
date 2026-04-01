@@ -1,0 +1,41 @@
+{% load admin_extras %}
+{% load i18n %}
+<h3>{% blocktranslate with filter_title=title %}By {{ filter_title }}{% endblocktranslate %}</h3>
+<ul>
+  <li>
+    <form method="get" onsubmit="
+      this.querySelectorAll('input[type=number]').forEach(function(el) {
+        if (el.value === '') el.disabled = true;
+      });
+      ">
+      <div style="display: flex; flex-direction: column; gap: 6px; padding: 4px 0;">
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <label style="width: 30px; font-size: 12px;">Min</label>
+          <input type="number" name="{{ spec.parameter_name }}__gte" min="0" max="100"
+                 value="{% filter_current_value spec.parameter_name 'gte' %}"
+                 style="width: 60px; padding: 3px 5px;"/>
+        </div>
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <label style="width: 30px; font-size: 12px;">Max</label>
+          <input type="number" name="{{ spec.parameter_name }}__lte" min="0" max="100"
+                 value="{% filter_current_value spec.parameter_name 'lte' %}"
+                 style="width: 60px; padding: 3px 5px;"/>
+        </div>
+      </div>
+      {# Preserve all other active filters and search #}
+      {% for k, v in request.GET.items %}
+        {% if k != spec.parameter_name|add:"__gte" and k != spec.parameter_name|add:"__lte" %}
+          <input type="hidden" name="{{ k }}" value="{{ v }}"/>
+        {% endif %}
+      {% endfor %}
+      <div style="display: flex; gap: 6px; margin-top: 4px;">
+        <button type="submit" style="flex: 1;">Apply</button>
+        {% filter_clear_url spec.parameter_name as clear_url %}
+        <a href="{{ clear_url }}"
+           style="flex: 1; text-align: center; padding: 3px 5px; background: #fff; border: 1px solid #ccc; text-decoration: none; color: #333; font-size: 13px;">
+          Clear
+        </a>
+      </div>
+    </form>
+  </li>
+</ul>
