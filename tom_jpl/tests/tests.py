@@ -483,7 +483,7 @@ class TestScoutDataService(TestCase):
                                'neoScore': 100},]
 
         target_params = {'name': 'ZTF10BL',
-                         'type': 'NON-SIDEREAL',
+                         'type': 'NON_SIDEREAL',
                          'permissions': 'OPEN',
                          'scheme': 'MPC_MINOR_PLANET',
                          'epoch_of_elements': 61079.212931752,
