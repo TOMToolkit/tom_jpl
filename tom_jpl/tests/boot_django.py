@@ -18,10 +18,11 @@ def boot_django():
         # SECURITY WARNING: keep the secret key used in production secret!
         SECRET_KEY='v5j-rg7sc+leg-m+vf947vi34+fs1%+$m%*l%sb7^fnwb$-29y',
         DEBUG=True,
+        ROOT_URLCONF='tom_jpl.tests.test_urls',
         DATABASES={
             'default': {
                 'ENGINE': 'django.db.backends.sqlite3',
-                'NAME': os.path.join(BASE_DIR, 'db.sqlite3'),
+                'NAME': ':memory:',
             }
         },
         TOM_NAME='Test TOM',

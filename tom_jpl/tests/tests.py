@@ -2,9 +2,9 @@ from datetime import datetime
 from dateutil.tz import tzutc
 
 from django.test import SimpleTestCase, TestCase
-from unittest import mock
+from unittest import mock, skipIf
 
-from tom_jpl.jpl import ScoutDataService
+from tom_jpl.jpl import ScoutDataService, ScoutDetail
 # from tom_dataservices.tests.factories import scout_resultsFactory
 from tom_targets.models import Target
 
@@ -574,7 +574,7 @@ class TestScoutDataService(TestCase):
     def test_create_target_from_query(self):
         expected_target = self.test_target
 
-        target = self.jpl_ds.create_target_from_query(self.scout_results[0])
+        target = self.jpl_ds.to_target(self.scout_results[0])
 
         self.assertEqual(target.name, expected_target.name)
         self.assertEqual(target.type, expected_target.type)
@@ -583,3 +583,24 @@ class TestScoutDataService(TestCase):
         self.assertEqual(target.scheme, expected_target.scheme)
         self.assertEqual(target.epoch_of_elements, expected_target.epoch_of_elements)
         self.assertAlmostEqual(target.mean_anomaly, expected_target.mean_anomaly, places=6)
+
+        self.assertEqual(ScoutDetail.objects.count(), 1)
+
+    def test_update_existing_target_from_query(self):
+        """Test that create_target_from_query updates an existing Target rather than creating a new one."""
+        existing_target = self.test_target
+        self.assertEqual(Target.objects.count(), 1)
+
+        target = self.jpl_ds.to_target(self.scout_results[0])
+
+        # No new Target should have been created
+        self.assertEqual(Target.objects.count(), 1)
+        # The existing Target should have been updated with the new data
+        self.assertEqual(target.id, existing_target.id)
+        self.assertEqual(target.name, existing_target.name)
+        self.assertEqual(target.type, existing_target.type)
+        self.assertEqual(target.ra, existing_target.ra)
+        self.assertEqual(target.dec, existing_target.dec)
+        self.assertEqual(target.scheme, existing_target.scheme)
+        self.assertEqual(target.epoch_of_elements, existing_target.epoch_of_elements)
+        self.assertAlmostEqual(target.mean_anomaly, existing_target.mean_anomaly, places=6)
