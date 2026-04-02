@@ -1,4 +1,5 @@
 from django.db import models
+from django.forms.models import model_to_dict
 
 from tom_targets.models import BaseTarget
 
@@ -34,3 +35,6 @@ class ScoutDetail(models.Model):
 
     def __str__(self):
         return self.target.name + f' (Impact rating: {self.impact_rating})'
+
+    def as_dict(self):
+        return model_to_dict(self, fields=[field.name for field in self._meta.fields])
