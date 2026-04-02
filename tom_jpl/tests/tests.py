@@ -2,11 +2,12 @@ from datetime import datetime
 from dateutil.tz import tzutc
 
 from django.test import SimpleTestCase, TestCase, RequestFactory
+from django.template.loader import render_to_string
 from django.contrib.auth.models import AnonymousUser
 from unittest import mock
 
 from tom_jpl.jpl import ScoutDataService, ScoutDetail
-# from tom_dataservices.tests.factories import scout_resultsFactory
+from tom_jpl.tests.factories import ScoutDetailFactory
 from tom_targets.models import Target
 
 
@@ -645,3 +646,29 @@ class TestScoutDataService(TestCase):
         self.assertEqual(target.scheme, existing_target.scheme)
         self.assertEqual(target.epoch_of_elements, existing_target.epoch_of_elements)
         self.assertAlmostEqual(target.mean_anomaly, existing_target.mean_anomaly, places=6)
+
+
+class ScoutDetailsPartialTest(TestCase):
+
+    def _render_partial(self, scoutdetail):
+        return render_to_string(
+            'tom_jpl/partials/scoutdetails_partial.html',
+            {'scoutdetail': scoutdetail}
+        )
+
+    def test_excludes_none_values(self):
+        scoutdetail = ScoutDetailFactory(ieo_score=None)
+        rendered = self._render_partial(scoutdetail)
+        self.assertNotIn('IEO', rendered)
+
+    def test_excludes_target_and_id(self):
+        scoutdetail = ScoutDetailFactory()
+        rendered = self._render_partial(scoutdetail)
+        self.assertNotIn('target', rendered)
+        self.assertNotIn('id"', rendered)  # avoid false positives on e.g. card-id
+
+    def test_displays_neo_score(self):
+        scoutdetail = ScoutDetailFactory(neo_score=78)
+        rendered = self._render_partial(scoutdetail)
+        self.assertIn('NEO', rendered)
+        self.assertIn('78', rendered)
