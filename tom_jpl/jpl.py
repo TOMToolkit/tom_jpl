@@ -19,7 +19,7 @@ class ScoutDataService(DataService):
     """
     Docstring for ScoutDataService
     """
-    name = 'Scout2'
+    name = 'Scout'
     app_version = '0.0.4'
     info_url = 'https://cneos.jpl.nasa.gov/scout/intro.html'
     query_results_table = 'tom_jpl/partials/scout_query_results_table.html'
