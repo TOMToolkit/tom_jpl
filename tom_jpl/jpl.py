@@ -325,8 +325,7 @@ class ScoutDataService(DataService):
         if target_updated:
             target.save()
             if request:
-                messages.success(request,f"Orbital elements for {target.name} have been updated."
-                                 )
+                messages.success(request, f"Orbital elements for {target.name} have been updated.")
         # Finally we update or create the scout detail data
         if target and target_result and 'scout_detail' in target_result:
             ScoutDetail.objects.update_or_create(target=target,
