@@ -35,3 +35,19 @@ def filter_current_value(context, base_field_name, suffix):
     if not spec:
         return ""
     return spec.request.GET.get(f"{base_field_name}__{suffix}", "")
+
+
+@register.simple_tag(takes_context=True)
+def choice_filter_url(context, field_name, value):
+    """
+    Returns a URL that sets the given choice filter param to value,
+    preserving all other active GET params (search, pagination, other filters).
+
+    Usage: {% choice_filter_url spec.parameter_name value as choice_url %}
+    """
+    spec = context.get('spec')
+    if not spec:
+        return "?"
+    params = spec.request.GET.copy()
+    params[field_name] = value
+    return f"?{params.urlencode()}"
