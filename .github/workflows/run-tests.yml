@@ -52,8 +52,10 @@ jobs:
           poetry install --with coverage,lint
       - name: Run Tests with coverage
         run: poetry run coverage run --include=tom_jpl/* tom_jpl/tests/run_tests.py
+      - name: Convert coverage to XML
+        run: poetry run coverage xml
       - name: Report coverage to Coveralls
         uses: coverallsapp/github-action@v2
         with:
-          format: python
+          format: cobertura
 
