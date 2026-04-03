@@ -6,8 +6,9 @@ register = template.Library()
 @register.simple_tag(takes_context=True)
 def filter_clear_url(context, base_field_name):
     """
-    Returns a URL that clears the gte/lte filter params for the given field,
+    Returns a URL that clears the filter params for the given field,
     preserving all other active GET params (search, pagination, other filters).
+    Handles both range filters (__gte/__lte) and plain choice filters.
 
     Usage: {% filter_clear_url spec.base_field_name as clear_url %}
     """
@@ -15,6 +16,7 @@ def filter_clear_url(context, base_field_name):
     if not spec:
         return "?"
     params = spec.request.GET.copy()
+    params.pop(base_field_name, None)
     params.pop(f"{base_field_name}__gte", None)
     params.pop(f"{base_field_name}__lte", None)
     qs = params.urlencode()

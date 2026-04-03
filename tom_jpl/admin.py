@@ -34,6 +34,18 @@ def make_score_filter(field_name, filter_title):
         parameter_name = field_name
         template = "admin/integer_gt_lt_filter.html"
 
+        def __init__(self, request, params, model, model_admin):
+            super().__init__(request, params, model, model_admin)
+            for param in self.expected_parameters():
+                if param in params:
+                    # extract last value from list in QueryDict
+                    self.used_parameters[param] = params.pop(param)[-1]
+
+        def value(self):
+            gte = self.used_parameters.get(f"{field_name}__gte")
+            lte = self.used_parameters.get(f"{field_name}__lte")
+            return gte or lte
+
         def has_output(self) -> bool:
             return True
 
@@ -45,9 +57,8 @@ def make_score_filter(field_name, filter_title):
             return (("dummy", "dummy"),)
 
         def queryset(self, request, queryset):
-            params = request.GET
-            gte = params.get(f"{field_name}__gte")
-            lte = params.get(f"{field_name}__lte")
+            gte = self.used_parameters.get(f"{field_name}__gte")
+            lte = self.used_parameters.get(f"{field_name}__lte")
             try:
                 if gte:
                     queryset = queryset.filter(**{f"{field_name}__gte": int(gte)})
