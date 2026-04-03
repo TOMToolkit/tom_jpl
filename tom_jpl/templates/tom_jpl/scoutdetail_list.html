@@ -1,0 +1,21 @@
+{% extends 'tom_common/base.html' %}
+
+{% block title %}Scout Details{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col-md-12">
+    <h2>{{ record_count }} Scout Detail{{ record_count|pluralize }}</h2>
+
+    {# Progress indicator (CSS provided by TOM Toolkit base template) #}
+    <div class="progress">
+        <div class="indeterminate"></div>
+    </div>
+
+    {# Table container -- this is the HTMX swap target #}
+    <div class="table-container">
+        {% include table.get_partial_template_name %}
+    </div>
+  </div>
+</div>
+{% endblock content %}
