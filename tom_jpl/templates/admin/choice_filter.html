@@ -1,0 +1,18 @@
+{% load i18n admin_extras %}
+<h3>{% blocktranslate with filter_title=title %}By {{ filter_title }}{% endblocktranslate %}</h3>
+<ul>
+  <li>
+    {% filter_clear_url spec.parameter_name as clear_url %}
+    <a href="{{ clear_url }}"{% if not spec.value %} class="selected"{% endif %}>
+      {% translate "All" %}
+    </a>
+  </li>
+  {% for value, label in spec.lookup_choices %}
+  <li>
+    {% choice_filter_url spec.parameter_name value as choice_url %}
+    <a href="{{ choice_url }}"{% if spec.value == value|stringformat:"s" %} class="selected"{% endif %}>
+      {{ label }}
+    </a>
+  </li>
+  {% endfor %}
+</ul>
