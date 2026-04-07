@@ -13,6 +13,8 @@
                 <dt class="col-sm-6" title="{% help_text scoutdetail key %}">{% verbose_name scoutdetail key %}</dt>
                 <dd class="col-sm-6">{{ value|truncate_value_for_display }}</dd>
             {% endif %}
+        {% empty %}
+            No SCOUT details available. 
         {% endfor %}
     </dl>
   </div>
