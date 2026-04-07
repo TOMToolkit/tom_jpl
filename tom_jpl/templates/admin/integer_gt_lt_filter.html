@@ -23,7 +23,7 @@
         </div>
       </div>
       {# Preserve all other active filters and search #}
-      {% for k, v in request.GET.items %}
+      {% for k, v in spec.request.GET.items %}
         {% if k != spec.parameter_name|add:"__gte" and k != spec.parameter_name|add:"__lte" %}
           <input type="hidden" name="{{ k }}" value="{{ v }}"/>
         {% endif %}
