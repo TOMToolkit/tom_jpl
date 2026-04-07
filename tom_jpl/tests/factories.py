@@ -1,6 +1,7 @@
 import factory
 
 from tom_targets.models import Target
+from tom_jpl.models import ScoutDetail
 
 
 class SiderealTargetFactory(factory.django.DjangoModelFactory):
@@ -33,3 +34,23 @@ class NonSiderealTargetFactory(factory.django.DjangoModelFactory):
     ephemeris_period_err = factory.Faker('pyfloat')
     ephemeris_epoch = factory.Faker('pyfloat')
     ephemeris_epoch_err = factory.Faker('pyfloat')
+
+
+class ScoutDetailFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = ScoutDetail
+
+    target = factory.SubFactory(NonSiderealTargetFactory)  # assuming this exists in factories.py
+    num_obs = factory.Faker('random_int', min=1, max=100)
+    neo_score = factory.Faker('random_int', min=0, max=100)
+    neo1km_score = factory.Faker('random_int', min=0, max=100)
+    pha_score = factory.Faker('random_int', min=0, max=100)
+    ieo_score = factory.Faker('random_int', min=0, max=100)
+    geocentric_score = factory.Faker('random_int', min=0, max=100)
+    impact_rating = factory.Faker('random_int', min=0, max=4)
+    ca_dist = factory.Faker('pyfloat', min_value=0, max_value=100, right_digits=2)
+    arc = factory.Faker('pyfloat', min_value=0, max_value=30, right_digits=2)
+    rms = factory.Faker('pyfloat', min_value=0, max_value=5, right_digits=2)
+    uncertainty = factory.Faker('pyfloat', min_value=0, max_value=100, right_digits=2)
+    uncertainty_p1 = factory.Faker('pyfloat', min_value=0, max_value=100, right_digits=2)
+    last_run = factory.Faker('date_time_this_year')

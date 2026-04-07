@@ -1,0 +1,22 @@
+{% load tom_common_extras %}
+{% load scoutdetail_extras %}
+<div class="card">
+    <div class="card-header">
+        <div style="display: flex; justify-content: space-between">
+            <h4 class="card-title">Scout Details</h4>
+        </div>
+    </div>
+  <div class="card-body">
+    <dl class="row">
+        {% for key, value in scoutdetail.as_dict.items %}
+            {% if value != None and value != '' and key != 'target' and key != 'id' %}
+                <dt class="col-sm-6" title="{% help_text scoutdetail key %}">{% verbose_name scoutdetail key %}</dt>
+                <dd class="col-sm-6">{{ value|truncate_value_for_display }}</dd>
+            {% endif %}
+        {% empty %}
+            No SCOUT details available. 
+        {% endfor %}
+    </dl>
+  </div>
+
+</div>
