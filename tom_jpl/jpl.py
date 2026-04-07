@@ -1,10 +1,11 @@
 from math import sqrt, degrees
 from dateutil.parser import parse
 from dateutil.tz import tzutc
-
-from astropy.constants import GM_sun, au
 import logging
 import requests
+
+from astropy.constants import GM_sun, au
+from django.contrib import messages
 
 from tom_dataservices.dataservices import DataService
 from tom_targets.models import Target
@@ -19,7 +20,7 @@ class ScoutDataService(DataService):
     """
     Docstring for ScoutDataService
     """
-    name = 'Scout2'
+    name = 'Scout'
     app_version = '0.0.4'
     info_url = 'https://cneos.jpl.nasa.gov/scout/intro.html'
     query_results_table = 'tom_jpl/partials/scout_query_results_table.html'
@@ -292,9 +293,43 @@ class ScoutDataService(DataService):
         return scout_detail
 
     def to_target(self, target_result=None, **kwargs):
+        """
+        We need to use and manipulate several parts of the created or retrieved target object, so we need to extend
+        to_target from the base DataService Class.
+        """
+        request = kwargs.get('request')
+        # First we create or retrieve the target, set permissions, and store aliases via the super.
         target = super().to_target(target_result, **kwargs)
+        # Next we re-create the new target in case the target previously existed.
+        update_target = self.create_target_from_query(target_result, **kwargs)
+        update_fields = ['arg_of_perihelion',
+                         'lng_asc_node',
+                         'inclination',
+                         'eccentricity',
+                         'epoch_of_elements',
+                         'epoch_of_perihelion',
+                         'perihdist',
+                         'abs_mag',
+                         'slope',
+                         'semimajor_axis',
+                         'mean_daily_motion',
+                         'mean_anomaly'
+                         ]
+        target_updated = False
+        # We update any of the appropriate orbital elements that might be updated for these newly discovered targets
+        for field in update_fields:
+            if getattr(target, field) != getattr(update_target, field):
+                setattr(target, field, getattr(update_target, field))
+                target_updated = True
+        # If anything has changed, we save the target, and notify the user
+        if target_updated:
+            target.save()
+            if request:
+                messages.success(request, f"Orbital elements for {target.name} have been updated.")
+        # Finally we update or create the scout detail data
         if target and target_result and 'scout_detail' in target_result:
-            scout_detail, created = ScoutDetail.objects.get_or_create(target=target, **target_result['scout_detail'])
-            print(scout_detail)
-
+            ScoutDetail.objects.update_or_create(target=target,
+                                                 defaults=target_result['scout_detail'],
+                                                 create_defaults=target_result['scout_detail'],
+                                                 )
         return target

@@ -626,13 +626,14 @@ class TestScoutDataService(TestCase):
         """Test that create_target_from_query updates an existing Target rather than creating a new one."""
         existing_target = self.test_target
         self.assertEqual(Target.objects.count(), 1)
-        request = self.factory.get('/')
 
         with mock.patch('tom_dataservices.dataservices.messages'):
             target_data = self.scout_results[0].copy()
             scout_detail = self.jpl_ds._parse_detail_data(target_data)
+            scout_detail['neo_score'] = 50
             target_data['scout_detail'] = scout_detail
-            target = self.jpl_ds.to_target(target_data, request=request)
+            target_data['orbits']['data'][0][2] = .1
+            target = self.jpl_ds.to_target(target_data)
 
         # No new Target should have been created
         self.assertEqual(Target.objects.count(), 1)
@@ -640,8 +641,8 @@ class TestScoutDataService(TestCase):
         self.assertEqual(target.id, existing_target.id)
         self.assertEqual(target.name, existing_target.name)
         self.assertEqual(target.type, existing_target.type)
-        self.assertEqual(target.ra, existing_target.ra)
-        self.assertEqual(target.dec, existing_target.dec)
         self.assertEqual(target.scheme, existing_target.scheme)
         self.assertEqual(target.epoch_of_elements, existing_target.epoch_of_elements)
-        self.assertAlmostEqual(target.mean_anomaly, existing_target.mean_anomaly, places=6)
+        # Test for updated fields
+        self.assertNotAlmostEqual(target.eccentricity, existing_target.eccentricity, places=2)
+        self.assertNotAlmostEqual(target.mean_anomaly, existing_target.mean_anomaly, places=2)
