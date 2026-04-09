@@ -2,10 +2,12 @@
 name = "tom-jpl"
 description = "TOMToolkit's JPL data service app"
 authors = [
-    {name = "Joey Chatelain",email = "jchatelain@lco.global"}
+    {name = "Joey Chatelain",email = "jchatelain@lco.global"},
+    {name = "Tim Lister", email = "tlister@lco.global"},
 ]
 maintainers = [
     {name = "Joey Chatelain", email = "jchatelain@lco.global"},
+    {name = "Tim Lister", email = "tlister@lco.global"},
     {name = "William Lindstrom", email = "llindstrom@lco.global"},
     {name = "Rachel Street", email = "rstreet@lco.global"},
 ]
