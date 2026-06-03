@@ -33,6 +33,16 @@ class ScoutDetail(models.Model):
                                     help_text='1-sigma plane-of-sky positional uncertainty (arcmin)')
     uncertainty_p1 = models.FloatField(null=True, blank=True, verbose_name='Uncertainty at +1 day',
                                        help_text='1-sigma plane-of-sky positional uncertainty at +1 day (arcmin)')
+    vmag = models.FloatField(null=True, blank=True, verbose_name='V Magnitude',
+                             help_text='Predicted V magnitude')
+    rate = models.FloatField(null=True, blank=True, verbose_name='Sky motion',
+                             help_text='Plane-of-sky motion rate (arcsec/min)')
+    ra = models.FloatField(null=True, blank=True, verbose_name='Right Ascension',
+                           help_text='Right ascension at the ephemeris time (degrees)')
+    dec = models.FloatField(null=True, blank=True, verbose_name='Declination',
+                            help_text='Declination at the ephemeris time (degrees)')
+    t_ephem = models.DateTimeField(null=True, blank=True, verbose_name='Ephemeris time',
+                                   help_text='Time the ephemeris quantities (ra, dec, vmag, rate) are valid for')
     last_run = models.DateTimeField(null=True, blank=True, help_text='Last time the data was updated from Scout')
 
     class Meta:

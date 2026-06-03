@@ -268,6 +268,20 @@ class ScoutDataService(DataService):
             target.mean_anomaly = mean_anomaly
         return target
 
+    @staticmethod
+    def _parse_ra_to_degrees(ra_str):
+        """Convert a Scout sexagesimal RA string (e.g. '08:54', as HH:MM[:SS]) to decimal degrees."""
+        if ra_str is None:
+            return None
+        parts = str(ra_str).split(':')
+        try:
+            hours = float(parts[0])
+            minutes = float(parts[1]) if len(parts) > 1 else 0.0
+            seconds = float(parts[2]) if len(parts) > 2 else 0.0
+        except (ValueError, IndexError):
+            return None
+        return (hours + minutes / 60.0 + seconds / 3600.0) * 15.0
+
     def _parse_detail_data(self, query_results, **kwargs):
         """Parse and coerce relevant fields from a per-object query result to create a dictionary of reduced datums.
         (These aren't really "reduced datums" in the sense of being derived from the raw data, but a
@@ -283,10 +297,17 @@ class ScoutDataService(DataService):
             'geocentric_score': query_results.get('geocentricScore'),
             'impact_rating': query_results.get('rating'),
             'ca_dist': float(query_results.get('caDist')) if query_results.get('caDist') is not None else None,
-            'arc': float(query_results.get('arc')) if query_results.get('arc') is not None else None,
+            # Scout reports 'arc' in hours; we store it in days for consistency with confirmed-object arcs.
+            'arc': float(query_results.get('arc')) / 24.0 if query_results.get('arc') is not None else None,
             'rms': float(query_results.get('rmsN')) if query_results.get('rmsN') is not None else None,
             'uncertainty': float(query_results.get('unc')) if query_results.get('unc') is not None else None,
             'uncertainty_p1': float(query_results.get('uncP1')) if query_results.get('uncP1') is not None else None,
+            'vmag': float(query_results.get('Vmag')) if query_results.get('Vmag') is not None else None,
+            'rate': float(query_results.get('rate')) if query_results.get('rate') is not None else None,
+            'ra': self._parse_ra_to_degrees(query_results.get('ra')),
+            'dec': float(query_results.get('dec')) if query_results.get('dec') is not None else None,
+            't_ephem': parse(query_results.get('tEphem')).replace(tzinfo=tzutc()) if query_results.get('tEphem')
+            else None,
             'last_run': parse(query_results.get('lastRun')).replace(tzinfo=tzutc()) if query_results.get('lastRun')
             else None
         }

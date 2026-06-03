@@ -27,6 +27,11 @@ def make_result(overrides=None):
         'arc': '0.35',
         'nObs': 4,
         'rmsN': '0.12',
+        'Vmag': '20.8',
+        'rate': '1.9',
+        'ra': '08:54',
+        'dec': '+28',
+        'tEphem': '2026-02-11 16:30',
         'lastRun': '2026-02-11 22:45',
     }
     if overrides:
@@ -356,7 +361,8 @@ class TestParseDetailData(SimpleTestCase):
         self.assertIsInstance(reduced_datums, dict)
 
         expected_keys = ['num_obs', 'neo_score', 'neo1km_score', 'pha_score', 'ieo_score', 'geocentric_score',
-                         'impact_rating', 'ca_dist', 'arc', 'rms', 'uncertainty', 'uncertainty_p1', 'last_run']
+                         'impact_rating', 'ca_dist', 'arc', 'rms', 'uncertainty', 'uncertainty_p1', 'vmag', 'rate',
+                         'ra', 'dec', 't_ephem', 'last_run']
 
         for datum in reduced_datums:
             self.assertTrue(datum in expected_keys)
@@ -377,10 +383,15 @@ class TestParseDetailData(SimpleTestCase):
                            'geocentric_score': 1,
                            'impact_rating': 2,
                            'ca_dist': 0.98,
-                           'arc': 0.35,
+                           'arc': 0.35 / 24.0,  # Scout reports arc in hours; stored in days
                            'rms': 0.12,
                            'uncertainty': 1400.0,
                            'uncertainty_p1': 1500.0,
+                           'vmag': 20.8,
+                           'rate': 1.9,
+                           'ra': 133.5,  # '08:54' -> (8 + 54/60) * 15 degrees
+                           'dec': 28.0,
+                           't_ephem': datetime(2026, 2, 11, 16, 30, tzinfo=tzutc()),
                            'last_run': datetime(2026, 2, 11, 22, 45, tzinfo=tzutc())
                            }
 
@@ -388,7 +399,8 @@ class TestParseDetailData(SimpleTestCase):
 
     def test_convert_values_more_nones(self):
         detail_data = make_result_with_orbits({'rmsN': None, 'unc': None, 'uncP1': None, 'caDist': None,
-                                               'lastRun': None, 'arc': None})
+                                               'lastRun': None, 'arc': None, 'Vmag': None, 'rate': None,
+                                               'ra': None, 'dec': None, 'tEphem': None})
 
         reduced_datums = self.ds._parse_detail_data(detail_data)
 
@@ -404,6 +416,11 @@ class TestParseDetailData(SimpleTestCase):
                            'rms': None,
                            'uncertainty': None,
                            'uncertainty_p1': None,
+                           'vmag': None,
+                           'rate': None,
+                           'ra': None,
+                           'dec': None,
+                           't_ephem': None,
                            'last_run': None
                            }
 
@@ -621,6 +638,11 @@ class TestScoutDataService(TestCase):
         self.assertEqual(target.scout_detail.rms, scout_detail['rms'])
         self.assertEqual(target.scout_detail.uncertainty, scout_detail['uncertainty'])
         self.assertEqual(target.scout_detail.uncertainty_p1, scout_detail['uncertainty_p1'])
+        self.assertEqual(target.scout_detail.vmag, scout_detail['vmag'])
+        self.assertEqual(target.scout_detail.rate, scout_detail['rate'])
+        self.assertEqual(target.scout_detail.ra, scout_detail['ra'])
+        self.assertEqual(target.scout_detail.dec, scout_detail['dec'])
+        self.assertEqual(target.scout_detail.t_ephem, scout_detail['t_ephem'])
         self.assertEqual(target.scout_detail.last_run, scout_detail['last_run'])
 
     def test_update_existing_target_from_query(self):
