@@ -46,7 +46,6 @@ def boot_django():
             'django_gravatar',
             'tom_targets',
             'tom_alerts',
-            'tom_catalogs',
             'tom_observations',
             'tom_dataproducts',
             'tom_dataservices',
