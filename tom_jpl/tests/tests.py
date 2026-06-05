@@ -694,3 +694,100 @@ class ScoutDetailsPartialTest(TestCase):
         rendered = self._render_partial(scoutdetail)
         self.assertIn('NEO', rendered)
         self.assertIn('78', rendered)
+
+
+# Scout API signature expected by query_service().
+_SCOUT_SIGNATURE = {'source': 'NASA/JPL Scout API', 'version': '1.3'}
+
+# A baseline form-parameter set with permissive thresholds (nothing excluded at the
+# summary stage), mirroring the defaults produced by ScoutForm.
+_PERMISSIVE_INPUT_PARAMETERS = {
+    'ca_dist_min': None, 'data_service': 'Scout', 'geo_score_max': 5,
+    'impact_rating_min': None, 'neo_score_min': None, 'pha_score_min': None,
+    'pos_unc_max': None, 'pos_unc_min': None, 'query_name': '', 'query_save': False,
+    'tdes': '',
+}
+
+
+def make_scout_api_get(summary_data, detail_data):
+    """Build a ``requests.get`` replacement for the Scout API.
+
+    The summary (list) query is answered with ``summary_data`` (the objects that go
+    in the ``data`` array); the per-object query (identified by a ``tdes`` parameter)
+    is answered with ``detail_data``. Both responses carry the expected signature.
+    """
+    summary_payload = {'signature': _SCOUT_SIGNATURE, 'count': len(summary_data), 'data': summary_data}
+
+    def _get(url, data=None, **kwargs):
+        if data and data.get('tdes'):
+            payload = dict(detail_data, signature=_SCOUT_SIGNATURE)
+        else:
+            payload = summary_payload
+        response = mock.Mock()
+        response.json.return_value = payload
+        return response
+
+    return _get
+
+
+class TestScoutIngestionFromMockedApi(TestCase):
+    """End-to-end ingest test that mocks the Scout API at the HTTP boundary.
+
+    Patching ``requests.get`` lets the real ``query_service`` -> ``query_targets`` ->
+    ``to_target`` chain run (signature check, summary/per-object branching, field
+    parsing and the ScoutDetail DB write), guarding the parse seams that the unit
+    tests mock away: arc hours -> days, sexagesimal RA -> degrees, and tEphem.
+    """
+
+    # Detail overrides that make the parsed candidate satisfy the Rubin ToO Section 2.1
+    # filters (rating >= 3, nObs > 5, arc > 1 hr, Vmag > 21.6 North).
+    RUBIN_PASSING_OVERRIDES = {'rating': 4, 'nObs': 8, 'arc': '2.0', 'Vmag': '21.9'}
+
+    def setUp(self):
+        self.ds = ScoutDataService()
+        self.factory = RequestFactory()
+
+    def _ingest(self, summary_obj, detail_obj):
+        """Run the full mocked-API ingest and return the created target(s)."""
+        fake_get = make_scout_api_get([summary_obj], detail_obj)
+        with mock.patch('tom_jpl.jpl.requests.get', side_effect=fake_get):
+            targets_data = self.ds.query_targets(dict(_PERMISSIVE_INPUT_PARAMETERS))
+
+        request = self.factory.get('/')
+        request.user = AnonymousUser()
+        created = []
+        with mock.patch('tom_dataservices.dataservices.messages'):
+            for target_data in targets_data:
+                created.append(self.ds.to_target(target_data, request=request))
+        return targets_data, created
+
+    def test_ingests_candidate_and_parses_detail_fields(self):
+        summary_obj = make_result(self.RUBIN_PASSING_OVERRIDES)
+        detail_obj = make_result_with_orbits(self.RUBIN_PASSING_OVERRIDES)
+
+        targets_data, created = self._ingest(summary_obj, detail_obj)
+
+        self.assertEqual(len(targets_data), 1)
+        self.assertEqual(Target.objects.count(), 1)
+        self.assertEqual(ScoutDetail.objects.count(), 1)
+
+        sd = created[0].scout_detail
+        self.assertEqual(sd.num_obs, 8)
+        self.assertAlmostEqual(sd.arc, 2.0 / 24.0)   # Scout reports hours; stored in days
+        self.assertAlmostEqual(sd.ra, 133.5)          # '08:54' sexagesimal -> degrees
+        self.assertEqual(sd.dec, 28.0)
+        self.assertAlmostEqual(sd.vmag, 21.9)
+        self.assertAlmostEqual(sd.rate, 1.9)
+        self.assertEqual(sd.t_ephem, datetime(2026, 2, 11, 16, 30, tzinfo=tzutc()))
+
+    def test_candidate_excluded_at_summary_stage_creates_nothing(self):
+        # A high geocentric score is rejected by the summary filter (geo_score_max=5),
+        # so no per-object fetch happens and no Target/ScoutDetail is created.
+        summary_obj = make_result(dict(self.RUBIN_PASSING_OVERRIDES, geocentricScore=42))
+        detail_obj = make_result_with_orbits(self.RUBIN_PASSING_OVERRIDES)
+
+        targets_data, created = self._ingest(summary_obj, detail_obj)
+
+        self.assertEqual(targets_data, [])
+        self.assertEqual(Target.objects.count(), 0)
+        self.assertEqual(ScoutDetail.objects.count(), 0)
