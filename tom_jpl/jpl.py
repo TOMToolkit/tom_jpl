@@ -11,7 +11,7 @@ from tom_dataservices.dataservices import DataService
 from tom_targets.models import Target
 from tom_jpl import __version__
 from tom_jpl.forms import ScoutForm
-from tom_jpl.models import ScoutDetail
+from tom_jpl.models import ScoutDetail, ScoutDetailHistory
 
 logger = logging.getLogger(__name__)
 
@@ -349,8 +349,18 @@ class ScoutDataService(DataService):
                 messages.success(request, f"Orbital elements for {target.name} have been updated.")
         # Finally we update or create the scout detail data
         if target and target_result and 'scout_detail' in target_result:
+            detail_data = target_result['scout_detail']
+            # Seeing the object in a Scout response means it is (still) active.
+            current_defaults = {**detail_data, 'active': True}
             ScoutDetail.objects.update_or_create(target=target,
-                                                 defaults=target_result['scout_detail'],
-                                                 create_defaults=target_result['scout_detail'],
+                                                 defaults=current_defaults,
+                                                 create_defaults=current_defaults,
                                                  )
+            if detail_data.get('last_run') is not None:
+                history_defaults = {k: v for k, v in detail_data.items() if k != 'last_run'}
+                ScoutDetailHistory.objects.get_or_create(
+                    target=target,
+                    last_run=detail_data['last_run'],
+                    defaults=history_defaults,
+                )
         return target

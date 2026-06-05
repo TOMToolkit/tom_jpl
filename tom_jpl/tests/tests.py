@@ -7,6 +7,7 @@ from django.contrib.auth.models import AnonymousUser
 from unittest import mock
 
 from tom_jpl.jpl import ScoutDataService, ScoutDetail
+from tom_jpl.models import ScoutDetailHistory
 from tom_jpl.tests.factories import ScoutDetailFactory
 from tom_targets.models import Target
 
@@ -791,3 +792,28 @@ class TestScoutIngestionFromMockedApi(TestCase):
         self.assertEqual(targets_data, [])
         self.assertEqual(Target.objects.count(), 0)
         self.assertEqual(ScoutDetail.objects.count(), 0)
+
+    def test_history_row_created_on_ingest(self):
+        summary_obj = make_result(self.RUBIN_PASSING_OVERRIDES)
+        detail_obj = make_result_with_orbits(self.RUBIN_PASSING_OVERRIDES)
+
+        _, created = self._ingest(summary_obj, detail_obj)
+
+        self.assertEqual(ScoutDetailHistory.objects.count(), 1)
+        h = created[0].scout_detail_history.get()
+        self.assertEqual(h.last_run, datetime(2026, 2, 11, 22, 45, tzinfo=tzutc()))
+        self.assertEqual(h.num_obs, 8)
+        self.assertAlmostEqual(h.arc, 2.0 / 24.0)
+        self.assertAlmostEqual(h.vmag, 21.9)
+        # A freshly-ingested candidate is marked active on its current-state row.
+        self.assertTrue(created[0].scout_detail.active)
+
+    def test_history_not_duplicated_on_second_ingest_with_same_last_run(self):
+        # Ingesting the same Scout recomputation twice must produce exactly one history row.
+        summary_obj = make_result(self.RUBIN_PASSING_OVERRIDES)
+        detail_obj = make_result_with_orbits(self.RUBIN_PASSING_OVERRIDES)
+
+        self._ingest(summary_obj, detail_obj)
+        self._ingest(summary_obj, detail_obj)
+
+        self.assertEqual(ScoutDetailHistory.objects.count(), 1)

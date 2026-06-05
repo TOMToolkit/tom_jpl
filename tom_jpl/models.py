@@ -4,14 +4,21 @@ from django.forms.models import model_to_dict
 from tom_targets.models import BaseTarget
 
 
-class ScoutDetail(models.Model):
+class BaseScoutDetail(models.Model):
+    """Abstract base holding the Scout snapshot fields shared by the current-state
+    (:class:`ScoutDetail`) and append-only (:class:`ScoutDetailHistory`) models.
+
+    Being ``abstract`` it creates no table of its own; its fields are copied into
+    each concrete subclass, so the field list is maintained in exactly one place.
+    """
+
     class ScoutImpactRating(models.IntegerChoices):
         NEGLIGIBLE = 0, 'Negligible'
         SMALL = 1, 'Small'
         MODEST = 2, 'Modest'
         MODERATE = 3, 'Moderate'
         ELEVATED = 4, 'Elevated'
-    target = models.OneToOneField(BaseTarget, on_delete=models.CASCADE, related_name='scout_detail')
+
     num_obs = models.IntegerField(null=True, blank=True, help_text='Number of observations')
     neo_score = models.IntegerField(null=True, blank=True, verbose_name='NEO Score',
                                     help_text='NEO digest score (0..100)')
@@ -46,10 +53,34 @@ class ScoutDetail(models.Model):
     last_run = models.DateTimeField(null=True, blank=True, help_text='Last time the data was updated from Scout')
 
     class Meta:
+        abstract = True
+
+    def as_dict(self):
+        return model_to_dict(self, fields=[field.name for field in self._meta.fields])
+
+
+class ScoutDetail(BaseScoutDetail):
+    """Current Scout state for a target (one row per target)."""
+    target = models.OneToOneField(BaseTarget, on_delete=models.CASCADE, related_name='scout_detail')
+    active = models.BooleanField(default=True,
+                                 help_text='Whether the object is still on the Scout list (False once it has left, '
+                                 'e.g. designated, removed, or impacted)')
+
+    class Meta:
         verbose_name = 'Scout Detail'
 
     def __str__(self):
         return self.target.name + f' (Impact rating: {self.impact_rating})'
 
-    def as_dict(self):
-        return model_to_dict(self, fields=[field.name for field in self._meta.fields])
+
+class ScoutDetailHistory(BaseScoutDetail):
+    """Append-only record of each Scout recomputation for a target; deduped on (target, last_run)."""
+    target = models.ForeignKey(BaseTarget, on_delete=models.CASCADE, related_name='scout_detail_history')
+
+    class Meta:
+        verbose_name = 'Scout Detail History'
+        unique_together = ('target', 'last_run')
+        ordering = ['target', 'last_run']
+
+    def __str__(self):
+        return self.target.name + f' (lastRun: {self.last_run})'
