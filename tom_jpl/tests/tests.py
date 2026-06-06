@@ -1,11 +1,15 @@
 from datetime import datetime
+from io import StringIO
 from dateutil.tz import tzutc
 
+from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase, RequestFactory
 from django.template.loader import render_to_string
 from django.contrib.auth.models import AnonymousUser
 from unittest import mock
 
+from tom_dataservices.models import DataServiceQuery
 from tom_jpl.jpl import ScoutDataService, ScoutDetail
 from tom_jpl.models import ScoutDetailHistory
 from tom_jpl.tests.factories import ScoutDetailFactory
@@ -817,3 +821,71 @@ class TestScoutIngestionFromMockedApi(TestCase):
         self._ingest(summary_obj, detail_obj)
 
         self.assertEqual(ScoutDetailHistory.objects.count(), 1)
+
+
+class TestIngestScoutCommand(TestCase):
+    """The ``ingest_scout`` management command re-runs a saved broad query headless.
+
+    It exercises the non-interactive ingest path (every result, no user selection)
+    and the #12 sweep that deactivates candidates no longer on Scout.
+    """
+
+    RUBIN_PASSING_OVERRIDES = {'rating': 4, 'nObs': 8, 'arc': '2.0', 'Vmag': '21.9'}
+
+    def setUp(self):
+        get_user_model().objects.create_superuser('ingest-admin', 'a@b.co', 'pw')
+        self.query = DataServiceQuery.objects.create(
+            name='Scout broad', data_service='Scout', parameters=dict(_PERMISSIVE_INPUT_PARAMETERS))
+
+    def _run(self, summary_objs, detail_obj, **opts):
+        fake_get = make_scout_api_get(summary_objs, detail_obj)
+        out = StringIO()
+        with mock.patch('tom_jpl.jpl.requests.get', side_effect=fake_get):
+            call_command('ingest_scout', '--query-name', 'Scout broad', stdout=out, **opts)
+        return out.getvalue()
+
+    def test_ingests_results_and_sets_active(self):
+        summary_obj = make_result(self.RUBIN_PASSING_OVERRIDES)
+        detail_obj = make_result_with_orbits(self.RUBIN_PASSING_OVERRIDES)
+
+        self._run([summary_obj], detail_obj)
+
+        sd = ScoutDetail.objects.get(target__name='ZTF10BL')
+        self.assertTrue(sd.active)
+        self.assertEqual(sd.target.scout_detail_history.count(), 1)
+        self.query.refresh_from_db()
+        self.assertIsNotNone(self.query.last_run)
+
+    def test_sweep_deactivates_candidates_no_longer_on_scout(self):
+        # A pre-existing active candidate that is absent from this run's results.
+        stale = ScoutDetailFactory(active=True)
+        self.assertTrue(stale.active)
+
+        summary_obj = make_result(self.RUBIN_PASSING_OVERRIDES)
+        detail_obj = make_result_with_orbits(self.RUBIN_PASSING_OVERRIDES)
+        self._run([summary_obj], detail_obj)
+
+        stale.refresh_from_db()
+        self.assertFalse(stale.active)
+        # The freshly-seen candidate stays active.
+        self.assertTrue(ScoutDetail.objects.get(target__name='ZTF10BL').active)
+
+    def test_no_sweep_flag_leaves_stale_active(self):
+        stale = ScoutDetailFactory(active=True)
+        summary_obj = make_result(self.RUBIN_PASSING_OVERRIDES)
+        detail_obj = make_result_with_orbits(self.RUBIN_PASSING_OVERRIDES)
+
+        self._run([summary_obj], detail_obj, no_sweep=True)
+
+        stale.refresh_from_db()
+        self.assertTrue(stale.active)
+
+    def test_dry_run_writes_nothing(self):
+        summary_obj = make_result(self.RUBIN_PASSING_OVERRIDES)
+        detail_obj = make_result_with_orbits(self.RUBIN_PASSING_OVERRIDES)
+
+        self._run([summary_obj], detail_obj, dry_run=True)
+
+        self.assertFalse(ScoutDetail.objects.filter(target__name='ZTF10BL').exists())
+        self.query.refresh_from_db()
+        self.assertIsNone(self.query.last_run)
