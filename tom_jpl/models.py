@@ -79,6 +79,7 @@ class ScoutDetailHistory(BaseScoutDetail):
 
     class Meta:
         verbose_name = 'Scout Detail History'
+        verbose_name_plural = 'Scout Detail Histories'
         unique_together = ('target', 'last_run')
         ordering = ['target', 'last_run']
 
