@@ -27,9 +27,7 @@ def boot_django():
             }
         },
         TOM_NAME='Test TOM',
-        INSTALLED_APPS = TOMTOOKIT_INSTALLED_APPS + [
-            APP_NAME
-        ],
+        INSTALLED_APPS=TOMTOOKIT_INSTALLED_APPS+[APP_NAME],
         SITE_ID=1,
         EXTRA_FIELDS={},
         TIME_ZONE='UTC',
