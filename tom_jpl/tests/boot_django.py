@@ -18,6 +18,7 @@ def boot_django():
         BASE_DIR=BASE_DIR,
         # SECURITY WARNING: keep the secret key used in production secret!
         DEBUG=True,
+        ROOT_URLCONF='tom_jpl.tests.test_urls',
         DATABASES={
             'default': {
                 'ENGINE': 'django.db.backends.sqlite3',
