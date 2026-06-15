@@ -6,7 +6,7 @@
 import os
 import django
 from django.conf import settings
-from tom_common.default_settings import TOMTOOKIT_INSTALLED_APPS
+from tom_common.default_settings import TOMTOOKIT_INSTALLED_APPS, TOMTOOKIT_MIDDLEWARE
 
 APP_NAME = 'tom_jpl'  # the stand-alone app we are testing
 
@@ -17,13 +17,12 @@ def boot_django():
     settings.configure(
         BASE_DIR=BASE_DIR,
         # SECURITY WARNING: keep the secret key used in production secret!
-        SECRET_KEY='v5j-rg7sc+leg-m+vf947vi34+fs1%+$m%*l%sb7^fnwb$-29y',
         DEBUG=True,
         ROOT_URLCONF='tom_jpl.tests.test_urls',
         DATABASES={
             'default': {
                 'ENGINE': 'django.db.backends.sqlite3',
-                'NAME': ':memory:',
+                'NAME': os.path.join(BASE_DIR, 'db.sqlite3'),
             }
         },
         TOM_NAME='Test TOM',
@@ -37,18 +36,7 @@ def boot_django():
             'observation_change_state': 'tom_common.hooks.observation_change_state',
             'data_product_post_upload': 'tom_dataproducts.hooks.data_product_post_upload'
         },
-        MIDDLEWARE=[
-            'django.middleware.security.SecurityMiddleware',
-            'django.contrib.sessions.middleware.SessionMiddleware',
-            'django.middleware.common.CommonMiddleware',
-            'django.middleware.csrf.CsrfViewMiddleware',
-            'django.contrib.auth.middleware.AuthenticationMiddleware',
-            'django.contrib.messages.middleware.MessageMiddleware',
-            'django.middleware.clickjacking.XFrameOptionsMiddleware',
-            'tom_common.middleware.Raise403Middleware',
-            'tom_common.middleware.ExternalServiceMiddleware',
-            'tom_common.middleware.AuthStrategyMiddleware',
-        ],
+        MIDDLEWARE=TOMTOOKIT_MIDDLEWARE,
         TEMPLATES=[
             {
                 'BACKEND': 'django.template.backends.django.DjangoTemplates',
@@ -74,40 +62,15 @@ def boot_django():
         STATICFILES_DIRS=[os.path.join(BASE_DIR, 'static')],
         MEDIA_ROOT=os.path.join(BASE_DIR, 'data'),
         MEDIA_URL='/data/',
-        TOM_ALERT_CLASSES=[
-            'tom_antares.antares.ANTARESBroker',
-        ],
         FACILITIES={
             'LCO': {
                 'portal_url': 'https://observe.lco.global',
                 'api_key': '',
             },
-            'GEM': {
-                'portal_url': {
-                    'GS': 'https://139.229.34.15:8443',
-                    'GN': 'https://128.171.88.221:8443',
-                },
-                'api_key': {
-                    'GS': '',
-                    'GN': '',
-                },
-                'user_email': '',
-                'programs': {
-                    'GS-YYYYS-T-NNN': {
-                        'MM': 'Std: Some descriptive text',
-                        'NN': 'Rap: Some descriptive text'
-                    },
-                    'GN-YYYYS-T-NNN': {
-                        'QQ': 'Std: Some descriptive text',
-                        'PP': 'Rap: Some descriptive text',
-                    },
-                },
-            },
         },
         TOM_FACILITY_CLASSES=[
-            'tom_observations.facilities.lco.LCOFacility',
+            'tom_observations.facilities.lco_redirect.LCORedirectFacility',
             'tom_observations.facilities.gemini.GEMFacility',
-            'tom_observations.facilities.soar.SOARFacility',
             'tom_observations.facilities.lt.LTFacility'
         ]
     )
