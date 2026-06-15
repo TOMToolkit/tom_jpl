@@ -205,7 +205,7 @@ class Command(BaseCommand):
         # Only consider targets that were ever ingested via Scout
         scout_targets = Target.objects.filter(
             name__in=designation_map.keys(),
-            scoutdetail__isnull=False,
+            scout_detail__isnull=False,
         )
 
         updated = 0

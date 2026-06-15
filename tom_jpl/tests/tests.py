@@ -11,9 +11,10 @@ from unittest import mock
 
 from tom_dataservices.models import DataServiceQuery
 from tom_jpl.jpl import ScoutDataService, ScoutDetail
+from tom_jpl.management.commands.ingest_scout import Command
 from tom_jpl.models import ScoutDetailHistory
 from tom_jpl.tests.factories import ScoutDetailFactory
-from tom_targets.models import Target
+from tom_targets.models import Target, TargetName
 
 
 def make_result(overrides=None):
@@ -889,3 +890,47 @@ class TestIngestScoutCommand(TestCase):
         self.assertFalse(ScoutDetail.objects.filter(target__name='ZTF10BL').exists())
         self.query.refresh_from_db()
         self.assertIsNone(self.query.last_run)
+
+
+class TestUpdateDesignations(TestCase):
+    """``_update_designations`` aliases Scout targets from the MPC previous-designations page.
+
+    Regression test for a ``FieldError`` ("Cannot resolve keyword 'scoutdetail'") caused by
+    a reverse-relation lookup that didn't match ``ScoutDetail.target``'s
+    ``related_name='scout_detail'``. The real MPC fetch is mocked out so this doesn't depend
+    on a network call or on the live "Previous NEOCP Objects" page containing a matching row.
+    """
+
+    def setUp(self):
+        self.command = Command(stdout=StringIO())
+        self.scout_detail = ScoutDetailFactory()
+        self.target = self.scout_detail.target
+        self.target.name = 'A11Df9S'
+        self.target.save()
+
+    @mock.patch('tom_jpl.management.commands.ingest_scout._fetch_mpc_prev_designations')
+    def test_adds_alias_for_scout_target(self, mock_fetch):
+        mock_fetch.return_value = {'A11Df9S': '2026 LX'}
+
+        self.command._update_designations(dry_run=False)
+
+        self.assertTrue(TargetName.objects.filter(name='2026 LX', target=self.target).exists())
+
+    @mock.patch('tom_jpl.management.commands.ingest_scout._fetch_mpc_prev_designations')
+    def test_dry_run_reports_without_writing(self, mock_fetch):
+        mock_fetch.return_value = {'A11Df9S': '2026 LX'}
+
+        self.command._update_designations(dry_run=True)
+
+        self.assertFalse(TargetName.objects.filter(name='2026 LX').exists())
+
+    @mock.patch('tom_jpl.management.commands.ingest_scout._fetch_mpc_prev_designations')
+    def test_ignores_targets_without_scout_detail(self, mock_fetch):
+        # A target whose name matches the MPC mapping but was never ingested via Scout.
+        other = Target.objects.create(name='A22Eg0T', type=Target.NON_SIDEREAL)
+        mock_fetch.return_value = {'A11Df9S': '2026 LX', 'A22Eg0T': '2026 MY'}
+
+        self.command._update_designations(dry_run=False)
+
+        self.assertTrue(TargetName.objects.filter(name='2026 LX', target=self.target).exists())
+        self.assertFalse(TargetName.objects.filter(target=other).exists())
