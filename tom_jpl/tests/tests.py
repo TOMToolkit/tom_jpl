@@ -1,5 +1,7 @@
 from datetime import datetime
 from io import StringIO
+
+import requests
 from dateutil.tz import tzutc
 
 from django.contrib.auth import get_user_model
@@ -11,7 +13,7 @@ from unittest import mock
 
 from tom_dataservices.models import DataServiceQuery
 from tom_jpl.jpl import ScoutDataService, ScoutDetail
-from tom_jpl.management.commands.ingest_scout import Command
+from tom_jpl.management.commands.ingest_scout import Command, _fetch_mpc_prev_designations
 from tom_jpl.models import ScoutDetailHistory
 from tom_jpl.tests.factories import ScoutDetailFactory
 from tom_targets.models import Target, TargetName
@@ -881,6 +883,18 @@ class TestIngestScoutCommand(TestCase):
         stale.refresh_from_db()
         self.assertTrue(stale.active)
 
+    def test_sweep_with_no_seen_ids_skips_deactivation(self):
+        # An empty result set almost certainly means a Scout API error; the sweep must
+        # NOT deactivate the whole stored population on that basis (see _sweep guard).
+        stale = ScoutDetailFactory(active=True)
+        out = StringIO()
+
+        Command(stdout=out)._sweep(set())
+
+        stale.refresh_from_db()
+        self.assertTrue(stale.active)
+        self.assertIn('skipping sweep', out.getvalue())
+
     def test_dry_run_writes_nothing(self):
         summary_obj = make_result(self.RUBIN_PASSING_OVERRIDES)
         detail_obj = make_result_with_orbits(self.RUBIN_PASSING_OVERRIDES)
@@ -934,3 +948,73 @@ class TestUpdateDesignations(TestCase):
 
         self.assertTrue(TargetName.objects.filter(name='2026 LX', target=self.target).exists())
         self.assertFalse(TargetName.objects.filter(target=other).exists())
+
+
+class TestFetchMpcPrevDesignations(SimpleTestCase):
+    """``_fetch_mpc_prev_designations`` parses the MPC 'Previous NEOCP Objects' HTML table.
+
+    The live MPC page is mocked at the ``requests.get`` boundary so this exercises the
+    real HTML-table parsing and row-filtering logic (header rows, dash/None placeholders,
+    short rows, empty cells) without a network call.
+    """
+
+    # Mirrors the real 5-column NEOCP page (trksub, iau_desig, status, reference, datetime_ut)
+    # with representative rows: asteroid designations, a comet (C/...), and lost/dne objects
+    # whose iau_desig renders as the literal "None". A <th> header (ignored — the parser only
+    # collects <td>) and synthetic edge cases (a <td> header-like row, dash placeholders, a
+    # single-cell row, an empty-trksub row) exercise the remaining filter branches.
+    SAMPLE_HTML = """
+    <table>
+      <tr><th>trksub</th><th>iau_desig</th><th>status</th><th>reference</th><th>datetime_ut</th></tr>
+      <tr><td>trksub</td><td>iau_desig</td><td>status</td><td>reference</td><td>datetime_ut</td></tr>
+      <tr><td>ST26F43</td><td>2026 LW2</td><td>None</td><td>MPEC 2026-L105</td><td>2026-06-15T21:36:25</td></tr>
+      <tr><td>P12nn8G</td><td>C/2026 L2</td><td>None</td><td>MPEC 2026-L104</td><td>2026-06-15T20:58:27</td></tr>
+      <tr><td>A11DnRU</td><td>2026 LS1</td><td>None</td><td>None</td><td>2026-06-15T15:32:57</td></tr>
+      <tr><td>ML81524</td><td>None</td><td>lost</td><td>None</td><td>2026-06-15T11:00:26</td></tr>
+      <tr><td>ST26F44</td><td>None</td><td>dne</td><td>None</td><td>2026-06-15T08:44:05</td></tr>
+      <tr><td>A33Zz9Q</td><td>&mdash;</td><td>None</td></tr>
+      <tr><td>A44Yy8P</td><td>-</td><td>None</td></tr>
+      <tr><td>OnlyOneCell</td></tr>
+      <tr><td></td><td>2026 ZZ</td></tr>
+    </table>
+    """
+
+    def _mock_response(self, text):
+        response = mock.Mock()
+        response.text = text
+        return response
+
+    @mock.patch('tom_jpl.management.commands.ingest_scout.requests.get')
+    def test_parses_only_real_designations(self, mock_get):
+        mock_get.return_value = self._mock_response(self.SAMPLE_HTML)
+
+        mapping = _fetch_mpc_prev_designations()
+
+        # Asteroid AND comet designations are kept; lost/dne ("None"), dash placeholders,
+        # header rows, short rows and empty-trksub rows are all filtered out.
+        self.assertEqual(
+            mapping,
+            {
+                'ST26F43': '2026 LW2',
+                'P12nn8G': 'C/2026 L2',  # comet designation is aliased like any other
+                'A11DnRU': '2026 LS1',
+            },
+        )
+        # lost / dne objects (iau_desig == "None") are excluded.
+        self.assertNotIn('ML81524', mapping)
+        self.assertNotIn('ST26F44', mapping)
+
+    @mock.patch('tom_jpl.management.commands.ingest_scout.requests.get')
+    def test_empty_table_returns_empty_mapping(self, mock_get):
+        mock_get.return_value = self._mock_response('<table></table>')
+
+        self.assertEqual(_fetch_mpc_prev_designations(), {})
+
+    @mock.patch('tom_jpl.management.commands.ingest_scout.requests.get')
+    def test_http_error_propagates(self, mock_get):
+        response = mock.Mock()
+        response.raise_for_status.side_effect = requests.HTTPError('500')
+        mock_get.return_value = response
+
+        with self.assertRaises(requests.HTTPError):
+            _fetch_mpc_prev_designations()
