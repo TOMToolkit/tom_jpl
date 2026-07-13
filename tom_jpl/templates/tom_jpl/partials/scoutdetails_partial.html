@@ -25,7 +25,7 @@
             <small class="text-muted">{{ row.last_run|date:"Y-m-d H:i" }}</small>
             <ul class="list-unstyled ml-3">
               {% for field, change in row.changes.items %}
-                <li>{% verbose_name row field as field_label %}{{ field_label|capfirst }}: {{ change.0|default_if_none:'—'|truncate_value_for_display }} &rarr; {{ change.1|default_if_none:'—'|truncate_value_for_display }}</li>
+                <li>{% verbose_name row field as field_label %}{{ field_label|capfirst }}: {{ change.0|format_value:field|default_if_none:'—'|truncate_value_for_display }} &rarr; {{ change.1|format_value:field|default_if_none:'—'|truncate_value_for_display }}</li>
               {% endfor %}
             </ul>
           </li>

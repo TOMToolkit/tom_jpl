@@ -39,9 +39,26 @@ def history_tab_context(context):
 
     target = context.get('target')
     history_rows = ScoutDetailHistory.annotated_history(target)
-    history_fields = [(field, ScoutDetailHistory._meta.get_field(field).verbose_name)
+    history_fields = [(field, FIELD_DISPLAY_LABELS.get(field, ScoutDetailHistory._meta.get_field(field).verbose_name))
                       for field in HISTORY_DISPLAY_FIELDS]
     return {'history_rows': history_rows, 'history_fields': history_fields}
+
+
+# Per-field format() specs for values shown in the history views.
+FIELD_DISPLAY_FORMATS = {'arc': '.2f'}
+
+# Display-only label overrides (e.g. to add units), applied on top of the model
+# verbose_names so presentation tweaks don't need a model change and migration.
+FIELD_DISPLAY_LABELS = {'ca_dist': 'C/A dist (LD)', 'arc': 'Arc (days)'}
+
+
+@register.filter
+def format_value(value, field_name):
+    """Apply any per-field display format (see FIELD_DISPLAY_FORMATS); None passes through."""
+    fmt = FIELD_DISPLAY_FORMATS.get(field_name)
+    if value is None or fmt is None:
+        return value
+    return format(value, fmt)
 
 
 @register.filter
@@ -50,7 +67,7 @@ def field_display(instance, field_name):
     display = getattr(instance, f'get_{field_name}_display', None)
     if callable(display):
         return display()
-    return getattr(instance, field_name)
+    return format_value(getattr(instance, field_name), field_name)
 
 
 @register.filter
@@ -65,7 +82,10 @@ def verbose_name(instance, field_name):
     Displays the more descriptive field name from a Django model field.
     This is different from the version in tom_common_extras in that it
     doesn't call .title() to preserve capitalization in the verbose name.
+    Display-only overrides in FIELD_DISPLAY_LABELS take precedence.
     """
+    if field_name in FIELD_DISPLAY_LABELS:
+        return FIELD_DISPLAY_LABELS[field_name]
     try:
         return instance._meta.get_field(field_name).verbose_name
     except (FieldDoesNotExist, AttributeError):

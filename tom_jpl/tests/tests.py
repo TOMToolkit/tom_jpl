@@ -892,6 +892,18 @@ class ScoutHistoryPartialTest(TestCase):
         rendered = self._render_history_tab()
         self.assertNotIn('table-warning', rendered)
 
+    def test_headers_show_units_for_ca_dist_and_arc(self):
+        self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()))
+        rendered = self._render_history_tab()
+        self.assertIn('C/A dist (LD)', rendered)
+        self.assertIn('Arc (days)', rendered)
+
+    def test_arc_truncated_to_two_decimal_places(self):
+        self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()), arc=23.632083333333)
+        rendered = self._render_history_tab()
+        self.assertIn('23.63', rendered)
+        self.assertNotIn('23.632', rendered)
+
     def test_impact_rating_uses_display_value(self):
         self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()), impact_rating=1)
         rendered = self._render_history_tab()
