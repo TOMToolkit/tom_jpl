@@ -29,7 +29,7 @@
                 {% for field, label in history_fields %}
                   {% with change=row.changes|get_change:field %}
                     {% if change %}
-                      <td class="table-warning" title="was {{ change.0|default_if_none:'—'|truncate_value_for_display }}">
+                      <td class="table-warning" title="was {{ change.0|format_value:field|default_if_none:'—'|truncate_value_for_display }}">
                         <strong>{{ row|field_display:field|default_if_none:''|truncate_value_for_display }}</strong>
                       </td>
                     {% else %}
