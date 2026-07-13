@@ -8,6 +8,11 @@ from tom_targets.models import BaseTarget
 # by definition and would drown out the interesting orbit-quality changes.
 HISTORY_UNTRACKED_FIELDS = {'id', 'target', 'last_run', 'ra', 'dec', 'vmag', 'rate', 't_ephem'}
 
+# Tracked fields shown as columns in the Scout History table, in display order.
+HISTORY_DISPLAY_FIELDS = ['num_obs', 'neo_score', 'neo1km_score', 'pha_score', 'ieo_score',
+                          'geocentric_score', 'impact_rating', 'ca_dist', 'arc', 'rms',
+                          'uncertainty', 'uncertainty_p1']
+
 
 class BaseScoutDetail(models.Model):
     """Abstract base holding the Scout snapshot fields shared by the current-state
@@ -102,3 +107,18 @@ class ScoutDetailHistory(BaseScoutDetail):
         old = previous.as_dict()
         return {field: (old[field], value) for field, value in self.as_dict().items()
                 if field not in HISTORY_UNTRACKED_FIELDS and value != old[field]}
+
+    @classmethod
+    def annotated_history(cls, target):
+        """Return the target's history rows newest first, each annotated with a `changes` dict.
+
+        `changes` holds the row-to-row differences (see :meth:`changes_from`) relative to the
+        chronologically previous Scout run.
+        """
+        rows = list(cls.objects.filter(target=target).order_by('last_run'))
+        previous = None
+        for row in rows:
+            row.changes = row.changes_from(previous)
+            previous = row
+        rows.reverse()
+        return rows
