@@ -800,15 +800,15 @@ files = [
 toml = ["tomli ; python_full_version <= \"3.11.0a6\""]
 
 [[package]]
-name = "crispy-bootstrap4"
-version = "2024.10"
-description = "Bootstrap4 template pack for django-crispy-forms"
+name = "crispy-bootstrap5"
+version = "2026.3"
+description = "Bootstrap5 template pack for django-crispy-forms"
 optional = false
-python-versions = ">=3.8"
+python-versions = ">=3.9"
 groups = ["main"]
 files = [
-    {file = "crispy-bootstrap4-2024.10.tar.gz", hash = "sha256:503e8922b0f3b5262a6fdf303a3a94eb2a07514812f1ca130b88f7c02dd25e2b"},
-    {file = "crispy_bootstrap4-2024.10-py3-none-any.whl", hash = "sha256:138a97884044ae4c4799c80595b36c42066e4e933431e2e971611e251c84f96c"},
+    {file = "crispy_bootstrap5-2026.3-py3-none-any.whl", hash = "sha256:e0fff85c0503e9aed610a0ee31368e2191d340657f813669491c288c1c2e2dfa"},
+    {file = "crispy_bootstrap5-2026.3.tar.gz", hash = "sha256:e7f5adb36acfbb456444c46e82c436931c796c539e9c620be4fa9dc9c9d6679c"},
 ]
 
 [package.dependencies]
@@ -938,20 +938,22 @@ argon2 = ["argon2-cffi (>=19.1.0)"]
 bcrypt = ["bcrypt"]
 
 [[package]]
-name = "django-bootstrap4"
-version = "24.4"
-description = "Bootstrap 4 for Django"
+name = "django-bootstrap5"
+version = "26.2"
+description = "Bootstrap 5 for Django"
 optional = false
-python-versions = ">=3.8"
+python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "django_bootstrap4-24.4-py3-none-any.whl", hash = "sha256:90f642d8c9a6622694544a4fdbf8e6734a037b33b5d6b2884cfd79c87c5d610f"},
-    {file = "django_bootstrap4-24.4.tar.gz", hash = "sha256:b6147eeaa534057f866962d50bcf506b3d378720340d7a8243494a6e33f4e23e"},
+    {file = "django_bootstrap5-26.2-py3-none-any.whl", hash = "sha256:179af37c59f4e9b1070fc650f30961c5d903c2c0ad60280ad5b63ed394f68658"},
+    {file = "django_bootstrap5-26.2.tar.gz", hash = "sha256:12331059c8230ba372ffaad990a706151e1ad8f721a870aa2e862cf6746f0d33"},
 ]
 
 [package.dependencies]
-beautifulsoup4 = ">=4.10.0"
-Django = ">=4.2"
+django = ">=4.2"
+
+[package.extras]
+jinja = ["jinja2 (>=3.0,<4)"]
 
 [[package]]
 name = "django-contrib-comments"
@@ -2723,14 +2725,14 @@ test = ["pytest", "tornado (>=4.5)", "typeguard"]
 
 [[package]]
 name = "tomtoolkit"
-version = "3.0.0a9"
+version = "3.0.0a13"
 description = "TOM Toolkit and base modules"
 optional = false
 python-versions = "<3.14,>=3.10.0"
 groups = ["main"]
 files = [
-    {file = "tomtoolkit-3.0.0a9-py3-none-any.whl", hash = "sha256:f8a000aea2ca218519dd47695c51b57a054fdc942b851c0820687aca7c6fa1c7"},
-    {file = "tomtoolkit-3.0.0a9.tar.gz", hash = "sha256:09abb35f48336997a96a09eb31644db1f81e2c2c07ff60000e662049f7259540"},
+    {file = "tomtoolkit-3.0.0a13-py3-none-any.whl", hash = "sha256:0be7b5d6aca5bc2251a4aadf160f22cca2e8ff79a6e56d800a5945c52fba96a5"},
+    {file = "tomtoolkit-3.0.0a13.tar.gz", hash = "sha256:be48bf5e38fe129fbf46d27b2eb7ce9aaa69dcecbf6c41077f80eca08c1a4c8a"},
 ]
 
 [package.dependencies]
@@ -2739,10 +2741,10 @@ astroplan = ">=0.8,<0.11"
 astropy = {version = ">=5.3.3,<8", markers = "python_version >= \"3.10\""}
 astroquery = "<1"
 beautifulsoup4 = "<5"
-crispy-bootstrap4 = ">=2023.1,<2024.11"
-cryptography = "<=47"
+crispy-bootstrap5 = "<2027"
+cryptography = "<=48.0.1"
 django = ">=5,<6"
-django-bootstrap4 = ">3,<25"
+django-bootstrap5 = "<27"
 django-contrib-comments = ">=2.0,<3.0"
 django-crispy-forms = ">=2.0,<3.0"
 django-extensions = ">=3.0.0,<4.0.0"
@@ -2870,4 +2872,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.14"
-content-hash = "84e4d975899f0382c59f37f6fc99a79b9b4667386a3c1d06e18854cd4e535370"
+content-hash = "1c9c1f0c5e691c145aca9bdc506163e459e66faa7d0a7ed032d82b0850417cf8"
