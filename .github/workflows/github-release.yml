@@ -36,5 +36,5 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: ${{ github.ref }}
-        release_name: tom_jpl ${{ github.ref }}
+        release_name: tom-jpl ${{ github.ref }}
         draft: true
