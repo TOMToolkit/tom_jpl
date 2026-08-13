@@ -71,6 +71,20 @@ class ScoutDataService(DataService):
         self.query_parameters = data
         return data
 
+    def build_query_parameters_from_target(self, target, **kwargs):
+        """
+        Build query parameters to re-query Scout for a single existing target, keyed by its
+        tracking designation (``Target.name``).
+
+        This is what lets a target be re-queried directly (e.g. from the "Manage data" tab, or
+        by a management command reconciling already-ingested candidates) rather than requiring
+        the whole Scout list to be re-fetched and re-filtered.
+
+        :param target: A target object to be queried
+        :return: query_parameters (as understood by :meth:`build_query_parameters`)
+        """
+        return {'tdes': target.name}
+
     def query_service(self, data, **kwargs):
         """Make call to the JPL Scout service
 

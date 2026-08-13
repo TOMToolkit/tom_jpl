@@ -4,16 +4,14 @@ from io import StringIO
 import requests
 from dateutil.tz import tzutc
 
-from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase, RequestFactory
 from django.template.loader import render_to_string
 from django.contrib.auth.models import AnonymousUser
 from unittest import mock
 
-from tom_dataservices.models import DataServiceQuery
 from tom_jpl.jpl import ScoutDataService, ScoutDetail
-from tom_jpl.management.commands.ingest_scout import Command, _fetch_mpc_prev_designations
+from tom_jpl.management.commands.updatescout import Command, _fetch_mpc_prev_designations
 from tom_jpl.models import ScoutDetailHistory
 from tom_jpl.tests.factories import ScoutDetailFactory
 from tom_targets.models import Target, TargetName
@@ -550,6 +548,19 @@ class TestScoutDataService(TestCase):
         self.assertEqual(parameters, expected_parameters)
         self.assertEqual(self.jpl_ds.input_parameters, self.input_parameters)
 
+    def test_build_query_parameters_from_target(self):
+        """build_query_parameters_from_target keys the query on the target's Scout designation
+        and its output is understood by build_query_parameters, e.g. for re-querying a single
+        already-ingested target.
+        """
+        query_parameters = self.jpl_ds.build_query_parameters_from_target(self.test_target)
+
+        self.assertEqual(query_parameters, {'tdes': 'ZTF10BL'})
+        self.assertEqual(
+            self.jpl_ds.build_query_parameters(query_parameters),
+            {'tdes': 'ZTF10BL', 'orbits': 1, 'n-orbits': 1},
+        )
+
     @mock.patch('tom_jpl.jpl.ScoutDataService.query_service')
     def test_query_targets_single(self, mock_client):
         mock_client.side_effect = [self.scout_results, ]
@@ -826,93 +837,106 @@ class TestScoutIngestionFromMockedApi(TestCase):
         self.assertEqual(ScoutDetailHistory.objects.count(), 1)
 
 
-class TestIngestScoutCommand(TestCase):
-    """The ``ingest_scout`` management command re-runs a saved broad query headless.
+class TestUpdateScoutCommand(TestCase):
+    """The ``updatescout`` management command reconciles already-ingested Scout candidates.
 
-    It exercises the non-interactive ingest path (every result, no user selection)
-    and the #12 sweep that deactivates candidates no longer on Scout.
+    Ingestion of *new* candidates now goes through tom_dataservices' ``rundataquery``
+    against a saved Scout ``DataServiceQuery``; this command only re-checks candidates
+    already marked ``active``, one at a time, via ``build_query_parameters_from_target``.
+    Checking each target individually (rather than diffing against one broad query's
+    results) means a target that merely stops matching some *other* query's cuts is never
+    mistaken for one that has actually left Scout.
     """
 
     RUBIN_PASSING_OVERRIDES = {'rating': 4, 'nObs': 8, 'arc': '2.0', 'Vmag': '21.9'}
 
-    def setUp(self):
-        get_user_model().objects.create_superuser('ingest-admin', 'a@b.co', 'pw')
-        self.query = DataServiceQuery.objects.create(
-            name='Scout broad', data_service='Scout', parameters=dict(_PERMISSIVE_INPUT_PARAMETERS))
+    def _run(self, tdes_response, **opts):
+        """Run the command with ``requests.get`` patched to answer any tdes-keyed query.
 
-    def _run(self, summary_objs, detail_obj, **opts):
-        fake_get = make_scout_api_get(summary_objs, detail_obj)
+        ``tdes_response`` is either a detail-object dict (candidate still on Scout) or
+        ``None`` (Scout has no record of it any more).
+        """
+        def fake_get(url, data=None, **kwargs):
+            response = mock.Mock()
+            if tdes_response is None:
+                response.json.return_value = {'error': 'Object not found'}
+            else:
+                response.json.return_value = dict(tdes_response, signature=_SCOUT_SIGNATURE)
+            return response
+
         out = StringIO()
         with mock.patch('tom_jpl.jpl.requests.get', side_effect=fake_get):
-            call_command('ingest_scout', '--query-name', 'Scout broad', stdout=out, **opts)
+            call_command('updatescout', stdout=out, **opts)
         return out.getvalue()
 
-    def test_ingests_results_and_sets_active(self):
-        summary_obj = make_result(self.RUBIN_PASSING_OVERRIDES)
+    def test_still_active_candidate_is_refreshed(self):
+        scout_detail = ScoutDetailFactory(active=True)
+        scout_detail.target.name = 'ZTF10BL'
+        scout_detail.target.save()
         detail_obj = make_result_with_orbits(self.RUBIN_PASSING_OVERRIDES)
 
-        self._run([summary_obj], detail_obj)
+        self._run(detail_obj, skip_designations=True)
 
-        sd = ScoutDetail.objects.get(target__name='ZTF10BL')
-        self.assertTrue(sd.active)
-        self.assertEqual(sd.target.scout_detail_history.count(), 1)
-        self.query.refresh_from_db()
-        self.assertIsNotNone(self.query.last_run)
+        scout_detail.refresh_from_db()
+        self.assertTrue(scout_detail.active)
+        self.assertEqual(scout_detail.num_obs, 8)
+        self.assertAlmostEqual(scout_detail.vmag, 21.9)
 
-    def test_sweep_deactivates_candidates_no_longer_on_scout(self):
-        # A pre-existing active candidate that is absent from this run's results.
-        stale = ScoutDetailFactory(active=True)
-        self.assertTrue(stale.active)
+    def test_departed_candidate_is_marked_inactive(self):
+        scout_detail = ScoutDetailFactory(active=True)
+        scout_detail.target.name = 'ZTF10BL'
+        scout_detail.target.save()
 
-        summary_obj = make_result(self.RUBIN_PASSING_OVERRIDES)
-        detail_obj = make_result_with_orbits(self.RUBIN_PASSING_OVERRIDES)
-        self._run([summary_obj], detail_obj)
+        out = self._run(None, skip_designations=True)
 
-        stale.refresh_from_db()
-        self.assertFalse(stale.active)
-        # The freshly-seen candidate stays active.
-        self.assertTrue(ScoutDetail.objects.get(target__name='ZTF10BL').active)
+        scout_detail.refresh_from_db()
+        self.assertFalse(scout_detail.active)
+        self.assertIn('has left Scout', out)
 
-    def test_no_sweep_flag_leaves_stale_active(self):
-        stale = ScoutDetailFactory(active=True)
-        summary_obj = make_result(self.RUBIN_PASSING_OVERRIDES)
-        detail_obj = make_result_with_orbits(self.RUBIN_PASSING_OVERRIDES)
+    def test_dry_run_reconcile_writes_nothing(self):
+        scout_detail = ScoutDetailFactory(active=True)
+        scout_detail.target.name = 'ZTF10BL'
+        scout_detail.target.save()
 
-        self._run([summary_obj], detail_obj, no_sweep=True)
+        self._run(None, skip_designations=True, dry_run=True)
 
-        stale.refresh_from_db()
-        self.assertTrue(stale.active)
+        scout_detail.refresh_from_db()
+        self.assertTrue(scout_detail.active)
 
-    def test_sweep_with_no_seen_ids_skips_deactivation(self):
-        # An empty result set almost certainly means a Scout API error; the sweep must
-        # NOT deactivate the whole stored population on that basis (see _sweep guard).
-        stale = ScoutDetailFactory(active=True)
-        out = StringIO()
+    def test_inactive_candidates_are_not_requeried(self):
+        scout_detail = ScoutDetailFactory(active=False)
 
-        Command(stdout=out)._sweep(set())
+        with mock.patch('tom_jpl.jpl.requests.get') as mock_get:
+            call_command('updatescout', skip_designations=True, stdout=StringIO())
 
-        stale.refresh_from_db()
-        self.assertTrue(stale.active)
-        self.assertIn('skipping sweep', out.getvalue())
+        mock_get.assert_not_called()
+        scout_detail.refresh_from_db()
+        self.assertFalse(scout_detail.active)
 
-    def test_dry_run_writes_nothing(self):
-        summary_obj = make_result(self.RUBIN_PASSING_OVERRIDES)
-        detail_obj = make_result_with_orbits(self.RUBIN_PASSING_OVERRIDES)
+    def test_skip_reconcile_flag_skips_reconciliation(self):
+        with mock.patch.object(Command, '_reconcile') as mock_reconcile, \
+                mock.patch.object(Command, '_update_designations'):
+            call_command('updatescout', skip_reconcile=True, stdout=StringIO())
 
-        self._run([summary_obj], detail_obj, dry_run=True)
+        mock_reconcile.assert_not_called()
 
-        self.assertFalse(ScoutDetail.objects.filter(target__name='ZTF10BL').exists())
-        self.query.refresh_from_db()
-        self.assertIsNone(self.query.last_run)
+    def test_skip_designations_flag_skips_designation_lookup(self):
+        with mock.patch.object(Command, '_reconcile'), \
+                mock.patch.object(Command, '_update_designations') as mock_update_designations:
+            call_command('updatescout', skip_designations=True, stdout=StringIO())
+
+        mock_update_designations.assert_not_called()
 
 
 class TestUpdateDesignations(TestCase):
-    """``_update_designations`` aliases Scout targets from the MPC previous-designations page.
+    """``_update_designations`` promotes a Scout target's official IAU designation.
 
-    Regression test for a ``FieldError`` ("Cannot resolve keyword 'scoutdetail'") caused by
-    a reverse-relation lookup that didn't match ``ScoutDetail.target``'s
-    ``related_name='scout_detail'``. The real MPC fetch is mocked out so this doesn't depend
-    on a network call or on the live "Previous NEOCP Objects" page containing a matching row.
+    Regression coverage for the ``related_name='scout_detail'`` reverse-relation lookup,
+    plus the rename-on-promotion behaviour: once an object receives an official IAU
+    designation, ``Target.name`` becomes that designation (matching community convention)
+    and the original Scout provisional is kept as a ``TargetName`` alias. The real MPC
+    fetch is mocked out so this doesn't depend on a network call or on the live "Previous
+    NEOCP Objects" page containing a matching row.
     """
 
     def setUp(self):
@@ -922,23 +946,27 @@ class TestUpdateDesignations(TestCase):
         self.target.name = 'A11Df9S'
         self.target.save()
 
-    @mock.patch('tom_jpl.management.commands.ingest_scout._fetch_mpc_prev_designations')
-    def test_adds_alias_for_scout_target(self, mock_fetch):
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designations')
+    def test_renames_target_and_keeps_provisional_as_alias(self, mock_fetch):
         mock_fetch.return_value = {'A11Df9S': '2026 LX'}
 
         self.command._update_designations(dry_run=False)
 
-        self.assertTrue(TargetName.objects.filter(name='2026 LX', target=self.target).exists())
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, '2026 LX')
+        self.assertTrue(TargetName.objects.filter(name='A11Df9S', target=self.target).exists())
 
-    @mock.patch('tom_jpl.management.commands.ingest_scout._fetch_mpc_prev_designations')
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designations')
     def test_dry_run_reports_without_writing(self, mock_fetch):
         mock_fetch.return_value = {'A11Df9S': '2026 LX'}
 
         self.command._update_designations(dry_run=True)
 
-        self.assertFalse(TargetName.objects.filter(name='2026 LX').exists())
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, 'A11Df9S')
+        self.assertFalse(TargetName.objects.filter(name='A11Df9S').exists())
 
-    @mock.patch('tom_jpl.management.commands.ingest_scout._fetch_mpc_prev_designations')
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designations')
     def test_ignores_targets_without_scout_detail(self, mock_fetch):
         # A target whose name matches the MPC mapping but was never ingested via Scout.
         other = Target.objects.create(name='A22Eg0T', type=Target.NON_SIDEREAL)
@@ -946,8 +974,23 @@ class TestUpdateDesignations(TestCase):
 
         self.command._update_designations(dry_run=False)
 
-        self.assertTrue(TargetName.objects.filter(name='2026 LX', target=self.target).exists())
-        self.assertFalse(TargetName.objects.filter(target=other).exists())
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, '2026 LX')
+        other.refresh_from_db()
+        self.assertEqual(other.name, 'A22Eg0T')
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designations')
+    def test_skips_when_designation_already_claimed(self, mock_fetch):
+        # Another target already carries the designation the mapping wants to assign here;
+        # renaming would collide with Target.name's uniqueness constraint, so it's skipped.
+        Target.objects.create(name='2026 LX', type=Target.NON_SIDEREAL)
+        mock_fetch.return_value = {'A11Df9S': '2026 LX'}
+
+        self.command._update_designations(dry_run=False)
+
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, 'A11Df9S')
+        self.assertFalse(TargetName.objects.filter(name='A11Df9S').exists())
 
 
 class TestFetchMpcPrevDesignations(SimpleTestCase):
@@ -984,7 +1027,7 @@ class TestFetchMpcPrevDesignations(SimpleTestCase):
         response.text = text
         return response
 
-    @mock.patch('tom_jpl.management.commands.ingest_scout.requests.get')
+    @mock.patch('tom_jpl.management.commands.updatescout.requests.get')
     def test_parses_only_real_designations(self, mock_get):
         mock_get.return_value = self._mock_response(self.SAMPLE_HTML)
 
@@ -1004,13 +1047,13 @@ class TestFetchMpcPrevDesignations(SimpleTestCase):
         self.assertNotIn('ML81524', mapping)
         self.assertNotIn('ST26F44', mapping)
 
-    @mock.patch('tom_jpl.management.commands.ingest_scout.requests.get')
+    @mock.patch('tom_jpl.management.commands.updatescout.requests.get')
     def test_empty_table_returns_empty_mapping(self, mock_get):
         mock_get.return_value = self._mock_response('<table></table>')
 
         self.assertEqual(_fetch_mpc_prev_designations(), {})
 
-    @mock.patch('tom_jpl.management.commands.ingest_scout.requests.get')
+    @mock.patch('tom_jpl.management.commands.updatescout.requests.get')
     def test_http_error_propagates(self, mock_get):
         response = mock.Mock()
         response.raise_for_status.side_effect = requests.HTTPError('500')
