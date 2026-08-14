@@ -526,7 +526,7 @@ class TestScoutDataService(TestCase):
                                'rmsN': '0.12',
                                'signature': {'source': 'NASA/JPL Scout API', 'version': '1.3'},
                                'lastRun': '2026-02-08 13:52',
-                               'neoScore': 100},]
+                               'neoScore': 100}, ]
 
         target_params = {'name': 'ZTF10BL',
                          'type': 'NON_SIDEREAL',
