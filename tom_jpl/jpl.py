@@ -372,11 +372,15 @@ class ScoutDataService(DataService):
         # Finally we update or create the scout detail data
         if target and target_result and 'scout_detail' in target_result:
             detail_data = target_result['scout_detail']
-            # Seeing the object in a Scout response means it is (still) active.
-            current_defaults = {**detail_data, 'active': True}
+            # A target seen here for the first time is, by definition, active. But on an
+            # existing ScoutDetail row, `active` is deliberately left out of `defaults` so it's
+            # untouched: the updatescout command's reconciliation is the sole authority on
+            # whether an already-known candidate has left Scout, and a stale target_result (e.g.
+            # a cached interactive query result submitted well after the query ran) must not be
+            # able to silently resurrect one that reconciliation already marked inactive.
             ScoutDetail.objects.update_or_create(target=target,
-                                                 defaults=current_defaults,
-                                                 create_defaults=current_defaults,
+                                                 defaults=detail_data,
+                                                 create_defaults={**detail_data, 'active': True},
                                                  )
             if detail_data.get('last_run') is not None:
                 history_defaults = {k: v for k, v in detail_data.items() if k != 'last_run'}

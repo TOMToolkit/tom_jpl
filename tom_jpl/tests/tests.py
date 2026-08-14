@@ -724,6 +724,21 @@ class TestScoutDataService(TestCase):
         self.assertNotAlmostEqual(target.eccentricity, existing_target.eccentricity, places=2)
         self.assertNotAlmostEqual(target.mean_anomaly, existing_target.mean_anomaly, places=2)
 
+    def test_to_target_does_not_resurrect_inactive_existing_scout_detail(self):
+        """A stale target_result (e.g. a cached interactive query result submitted well after
+        the query ran) must not silently reactivate a candidate that updatescout's reconciliation
+        has already determined has left Scout -- only ScoutDetail *creation* should default
+        active=True; updating an existing row must leave active as-is.
+        """
+        ScoutDetail.objects.create(target=self.test_target, active=False)
+
+        with mock.patch('tom_dataservices.dataservices.messages'):
+            target_data = self.scout_results[0].copy()
+            target_data['scout_detail'] = self.jpl_ds._parse_detail_data(target_data)
+            self.jpl_ds.to_target(target_data)
+
+        self.assertFalse(ScoutDetail.objects.get(target=self.test_target).active)
+
 
 class ScoutDetailsPartialTest(TestCase):
 
