@@ -130,10 +130,10 @@ ImpactRatingFilter = make_choice_filter('impact_rating', _('Impact Rating'), [
 
 @admin.register(ScoutDetail)
 class ScoutDetailAdmin(admin.ModelAdmin):
-    list_display = ('target', 'neo_score', 'pha_score', 'geocentric_score', 'impact_rating',
+    list_display = ('target', 'active', 'neo_score', 'pha_score', 'geocentric_score', 'impact_rating',
                     'ca_dist', 'uncertainty', 'uncertainty_p1', 'last_run')
     search_fields = ('target__name', )
-    list_filter = [NEOScoreFilter, PHAScoreFilter, GeocentricScoreFilter, ImpactRatingFilter]
+    list_filter = ['active', NEOScoreFilter, PHAScoreFilter, GeocentricScoreFilter, ImpactRatingFilter]
 
 
 @admin.register(ScoutDetailHistory)
