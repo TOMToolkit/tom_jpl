@@ -4,7 +4,9 @@ from dateutil.tz import tzutc
 import logging
 import requests
 
+from astropy import units as u
 from astropy.constants import GM_sun, au
+from astropy.coordinates import Angle
 from django.contrib import messages
 
 from tom_dataservices.dataservices import DataService
@@ -286,14 +288,13 @@ class ScoutDataService(DataService):
         """Convert a Scout sexagesimal RA string (e.g. '08:54', as HH:MM[:SS]) to decimal degrees."""
         if ra_str is None:
             return None
-        parts = str(ra_str).split(':')
         try:
-            hours = float(parts[0])
-            minutes = float(parts[1]) if len(parts) > 1 else 0.0
-            seconds = float(parts[2]) if len(parts) > 2 else 0.0
-        except (ValueError, IndexError):
+            return Angle(ra_str, unit=u.hourangle).degree
+        except ValueError:
+            # Also catches astropy's IllegalHourError/IllegalMinuteError/IllegalSecondError
+            # (all ValueError subclasses), so an out-of-range value like '25:00' is rejected
+            # rather than silently producing an RA past 360 degrees.
             return None
-        return (hours + minutes / 60.0 + seconds / 3600.0) * 15.0
 
     def _parse_detail_data(self, query_results, **kwargs):
         """Parse and coerce relevant fields from a per-object query result to create a dictionary of reduced datums.

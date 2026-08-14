@@ -354,6 +354,27 @@ class TestQueryTargetsFiltering(TestCase):
         self.assertEqual(targets[0]['objectName'], 'ZTF10BL')
 
 
+class TestParseRaToDegrees(SimpleTestCase):
+    """Tests for ScoutDataService._parse_ra_to_degrees(), backed by astropy.coordinates.Angle."""
+
+    def test_none_returns_none(self):
+        self.assertIsNone(ScoutDataService._parse_ra_to_degrees(None))
+
+    def test_hours_minutes(self):
+        self.assertAlmostEqual(ScoutDataService._parse_ra_to_degrees('08:54'), 133.5)
+
+    def test_hours_minutes_seconds(self):
+        self.assertAlmostEqual(ScoutDataService._parse_ra_to_degrees('08:54:30'), 133.625)
+
+    def test_malformed_string_returns_none(self):
+        self.assertIsNone(ScoutDataService._parse_ra_to_degrees('garbage'))
+
+    def test_out_of_range_hours_returns_none(self):
+        # Scout should never send this, but a bogus value must be rejected rather than
+        # silently producing an RA past 360 degrees.
+        self.assertIsNone(ScoutDataService._parse_ra_to_degrees('25:00'))
+
+
 class TestParseDetailData(SimpleTestCase):
     """Tests for ScoutDataService._parse_detail_data()"""
 
