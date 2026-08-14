@@ -304,11 +304,26 @@ class ScoutDataService(DataService):
             # rather than silently producing an RA past 360 degrees.
             return None
 
+    @staticmethod
+    def _safe_float(value):
+        """Convert value to float, returning None for missing or malformed input rather than raising --
+        matches the defensive (ValueError, TypeError) handling _parse_result_values already applies to
+        'unc'/'caDist', extended to every other numeric field Scout reports as a string.
+        """
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return None
+
     def _parse_detail_data(self, query_results, **kwargs):
         """Parse and coerce relevant fields from a per-object query result to create a dictionary of reduced datums.
         (These aren't really "reduced datums" in the sense of being derived from the raw data, but a
         temporary hacky workaround as these are the only things supported post-Target saving)
         """
+
+        arc_hours = self._safe_float(query_results.get('arc'))
 
         scout_detail = {
             'num_obs': query_results.get('nObs'),
@@ -318,16 +333,16 @@ class ScoutDataService(DataService):
             'ieo_score': query_results.get('ieoScore'),
             'geocentric_score': query_results.get('geocentricScore'),
             'impact_rating': query_results.get('rating'),
-            'ca_dist': float(query_results.get('caDist')) if query_results.get('caDist') is not None else None,
+            'ca_dist': self._safe_float(query_results.get('caDist')),
             # Scout reports 'arc' in hours; we store it in days for consistency with confirmed-object arcs.
-            'arc': float(query_results.get('arc')) / 24.0 if query_results.get('arc') is not None else None,
-            'rms': float(query_results.get('rmsN')) if query_results.get('rmsN') is not None else None,
-            'uncertainty': float(query_results.get('unc')) if query_results.get('unc') is not None else None,
-            'uncertainty_p1': float(query_results.get('uncP1')) if query_results.get('uncP1') is not None else None,
-            'vmag': float(query_results.get('Vmag')) if query_results.get('Vmag') is not None else None,
-            'rate': float(query_results.get('rate')) if query_results.get('rate') is not None else None,
+            'arc': arc_hours / 24.0 if arc_hours is not None else None,
+            'rms': self._safe_float(query_results.get('rmsN')),
+            'uncertainty': self._safe_float(query_results.get('unc')),
+            'uncertainty_p1': self._safe_float(query_results.get('uncP1')),
+            'vmag': self._safe_float(query_results.get('Vmag')),
+            'rate': self._safe_float(query_results.get('rate')),
             'ra': self._parse_ra_to_degrees(query_results.get('ra')),
-            'dec': float(query_results.get('dec')) if query_results.get('dec') is not None else None,
+            'dec': self._safe_float(query_results.get('dec')),
             't_ephem': parse(query_results.get('tEphem')).replace(tzinfo=tzutc()) if query_results.get('tEphem')
             else None,
             'last_run': parse(query_results.get('lastRun')).replace(tzinfo=tzutc()) if query_results.get('lastRun')

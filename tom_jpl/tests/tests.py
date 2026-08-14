@@ -468,6 +468,18 @@ class TestParseDetailData(SimpleTestCase):
 
         self.assertDictEqual(reduced_datums, expected_datums)
 
+    def test_malformed_numeric_fields_return_none_not_raise(self):
+        """A present-but-non-numeric value (e.g. a status placeholder instead of a number) must
+        degrade to None like a missing value would, not raise and abort the whole ingest/reconcile.
+        """
+        detail_data = make_result_with_orbits({'rmsN': 'n/a', 'unc': 'n/a', 'uncP1': 'n/a', 'caDist': 'n/a',
+                                               'arc': 'n/a', 'Vmag': 'n/a', 'rate': 'n/a', 'dec': 'n/a'})
+
+        reduced_datums = self.ds._parse_detail_data(detail_data)
+
+        for field in ('rms', 'uncertainty', 'uncertainty_p1', 'ca_dist', 'arc', 'vmag', 'rate', 'dec'):
+            self.assertIsNone(reduced_datums[field], f'{field} should be None for a malformed input')
+
 
 class TestScoutDataService(TestCase):
     """
