@@ -33,6 +33,14 @@ class ScoutDataService(DataService):
     # Gaussian gravitational constant
     _k = degrees(sqrt(GM_sun.value) * au.value**-1.5 * 86400.0)
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Set by build_query_parameters() whenever it's given form-shaped parameters (i.e. it
+        # has a 'neo_score_min' key); a DataServiceQuery whose parameters were saved/edited
+        # without going through the form -- e.g. hand-edited in the admin -- lacks that key, so
+        # this default must exist independently rather than only ever being set conditionally.
+        self.input_parameters = {}
+
     @classmethod
     def urls(cls, **kwargs) -> dict:
         """Dictionary of urls for the JPL Scout API (all identical in this case)"""
@@ -141,8 +149,8 @@ class ScoutDataService(DataService):
             'neo_score_min': neo_score_min,
             'pha_score_min': pha_score_min,
             'geo_score_max': geo_score_max,
-            'impact_rating_min': p['impact_rating_min'],  # May be None intentionally
-            'ca_dist_min': p['ca_dist_min'],
+            'impact_rating_min': p.get('impact_rating_min'),  # May be None/absent intentionally
+            'ca_dist_min': p.get('ca_dist_min'),
             'pos_unc_min': pos_unc_min,
             'pos_unc_max': pos_unc_max,
         }

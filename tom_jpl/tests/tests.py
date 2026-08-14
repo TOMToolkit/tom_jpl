@@ -81,6 +81,21 @@ class TestGetFilterThresholds(SimpleTestCase):
             params.update(overrides)
         self.ds.input_parameters = params
 
+    def test_never_set_input_parameters_returns_permissive_defaults(self):
+        """A fresh ScoutDataService (input_parameters never assigned by build_query_parameters,
+        e.g. a DataServiceQuery.parameters blob saved/edited without a 'neo_score_min' key) must
+        not raise AttributeError/KeyError -- it should behave the same as all-None thresholds.
+        """
+        thresholds = self.ds._get_filter_thresholds()
+
+        self.assertEqual(thresholds['neo_score_min'], 0)
+        self.assertEqual(thresholds['pha_score_min'], 0)
+        self.assertEqual(thresholds['geo_score_max'], 101)
+        self.assertEqual(thresholds['pos_unc_min'], 0)
+        self.assertEqual(thresholds['pos_unc_max'], 360 * 60)
+        self.assertIsNone(thresholds['impact_rating_min'])
+        self.assertIsNone(thresholds['ca_dist_min'])
+
     def test_all_none_returns_permissive_defaults(self):
         """When all optional params are None, defaults should allow everything through."""
         self._set_input_params()
