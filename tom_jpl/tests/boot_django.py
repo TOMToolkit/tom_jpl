@@ -18,6 +18,7 @@ def boot_django():
         BASE_DIR=BASE_DIR,
         # SECURITY WARNING: keep the secret key used in production secret!
         DEBUG=True,
+        DEFAULT_AUTO_FIELD='django.db.models.AutoField',
         ROOT_URLCONF='tom_jpl.tests.test_urls',
         DATABASES={
             'default': {
