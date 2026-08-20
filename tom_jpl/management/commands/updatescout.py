@@ -18,6 +18,7 @@ the rest of an already-ingested candidate's lifecycle:
 Suitable for running from cron.
 """
 
+import re
 import requests
 from html.parser import HTMLParser
 
@@ -31,48 +32,43 @@ from tom_jpl.models import ScoutDetail
 _MPC_PREV_DES_URL = 'https://minorplanetcenter.net/mpcops/neocp/neocp_prev_des/'
 
 
-def _fetch_mpc_prev_designations():
-    """Fetch the 100 most-recent NEOCP-to-official-designation mappings from the MPC.
+class _TableParser(HTMLParser):
+    """Collect text content of every <td> cell, grouped by <tr>."""
 
-    Parses the HTML table at :data:`_MPC_PREV_DES_URL` and returns a dict
-    ``{trksub: iau_desig}`` for objects that received a real IAU provisional
-    designation.  Objects with status ``lost``, ``dne``, etc. are excluded.
-    Network or parse failures propagate as exceptions; callers should catch and
-    warn rather than abort.
-    """
+    def __init__(self):
+        super().__init__()
+        self._in_cell = False
+        self._row = []
+        self.rows = []
 
-    class _TableParser(HTMLParser):
-        """Collect text content of every <td> cell, grouped by <tr>."""
-
-        def __init__(self):
-            super().__init__()
-            self._in_cell = False
+    def handle_starttag(self, tag, attrs):
+        if tag == 'tr':
             self._row = []
-            self.rows = []
+        elif tag == 'td':
+            self._in_cell = True
+            self._row.append('')
 
-        def handle_starttag(self, tag, attrs):
-            if tag == 'tr':
-                self._row = []
-            elif tag == 'td':
-                self._in_cell = True
-                self._row.append('')
+    def handle_endtag(self, tag):
+        if tag == 'td':
+            self._in_cell = False
+        elif tag == 'tr' and self._row:
+            self.rows.append(list(self._row))
+            self._row = []
 
-        def handle_endtag(self, tag):
-            if tag == 'td':
-                self._in_cell = False
-            elif tag == 'tr' and self._row:
-                self.rows.append(list(self._row))
-                self._row = []
+    def handle_data(self, data):
+        if self._in_cell and self._row:
+            self._row[-1] += data
 
-        def handle_data(self, data):
-            if self._in_cell and self._row:
-                self._row[-1] += data
 
-    response = requests.get(_MPC_PREV_DES_URL, timeout=30)
-    response.raise_for_status()
-
+def _parse_designation_rows(html):
+    """Parse an MPC 'Previous NEOCP Objects' table (full page or single-result AJAX
+    fragment -- both share the same 5-column row shape) into a dict ``{trksub:
+    iau_desig}`` for rows that represent a real IAU provisional designation. Objects
+    with status ``lost``, ``dne``, etc. are excluded. Shared by the bulk rolling-table
+    fetch and the individual-object fallback lookup.
+    """
     parser = _TableParser()
-    parser.feed(response.text)
+    parser.feed(html)
 
     mapping = {}
     for row in parser.rows:
@@ -97,6 +93,56 @@ def _fetch_mpc_prev_designations():
             continue
         mapping[trksub] = iau_desig
     return mapping
+
+
+def _fetch_mpc_prev_designations():
+    """Fetch the 100 most-recent NEOCP-to-official-designation mappings from the MPC.
+
+    Parses the HTML table at :data:`_MPC_PREV_DES_URL`. Network or parse failures
+    propagate as exceptions; callers should catch and warn rather than abort.
+    """
+    response = requests.get(_MPC_PREV_DES_URL, timeout=30)
+    response.raise_for_status()
+    return _parse_designation_rows(response.text)
+
+
+def _mpc_session_and_csrf_token():
+    """Start a session against the MPC previous-designations page and scrape its CSRF
+    token, for reuse across multiple individual lookups without re-fetching the page
+    (and its cookie) for each one.
+    """
+    session = requests.Session()
+    page = session.get(_MPC_PREV_DES_URL, timeout=30)
+    page.raise_for_status()
+
+    match = re.search(r'name=[\'"]csrfmiddlewaretoken[\'"]\s+value=[\'"]([^\'"]+)[\'"]', page.text)
+    if not match:
+        raise ValueError('Could not find a CSRF token on the MPC previous-designations page.')
+    return session, match.group(1)
+
+
+def _fetch_mpc_prev_designation_for(session, csrf_token, trksub):
+    """Look up a single object's designation via the MPC page's own search form.
+
+    This is the fallback for a target not covered by the rolling ~100-entry table
+    :func:`_fetch_mpc_prev_designations` scrapes -- e.g. after a FOMO outage longer
+    than that window covers. Submits the same AJAX request the page's own "Submit"
+    button does (a POST to the page's own URL, since the visible button is JS-driven
+    rather than a plain form submit) and returns the IAU designation string, or None
+    if the object isn't found or hasn't been resolved yet. Network/parse failures
+    propagate; callers should catch per-lookup so one failure doesn't abort the rest.
+    """
+    response = session.post(
+        _MPC_PREV_DES_URL,
+        data={'csrfmiddlewaretoken': csrf_token, 'desig': trksub},
+        headers={'Referer': _MPC_PREV_DES_URL, 'X-Requested-With': 'XMLHttpRequest'},
+        timeout=30,
+    )
+    response.raise_for_status()
+    fragment = response.json().get('neocp_prev_des')
+    if not fragment:
+        return None
+    return _parse_designation_rows(fragment).get(trksub)
 
 
 class Command(BaseCommand):
@@ -182,7 +228,9 @@ class Command(BaseCommand):
             designation_map = _fetch_mpc_prev_designations()
         except Exception as exc:
             self.stdout.write(self.style.WARNING(f'  Could not fetch MPC designations: {exc}'))
-            return
+            designation_map = {}
+
+        designation_map.update(self._fallback_lookup_designations(designation_map))
 
         if not designation_map:
             self.stdout.write('  No designations returned from MPC.')
@@ -229,3 +277,43 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS(f'  {verb} {updated} target(s) to their IAU designation.'))
         else:
             self.stdout.write('  No new designations to record.')
+
+    def _fallback_lookup_designations(self, designation_map):
+        """Individually re-check already-inactive Scout targets the rolling table doesn't
+        cover -- e.g. after a FOMO outage longer than that ~100-entry window spans.
+
+        A target whose name already looks like a resolved IAU designation (contains a
+        space, or a comet-style '/', per IAU designation grammar -- Scout trksubs contain
+        neither) was already renamed by a previous run, so it's excluded here rather than
+        looked up again on every run forever. Returns a dict to merge into the caller's
+        designation_map; never raises, so one failed lookup (or an unreachable MPC page)
+        doesn't stop the rest of _update_designations from using the bulk-table results.
+        """
+        from tom_targets.models import Target
+
+        stuck_names = list(
+            Target.objects.filter(scout_detail__active=False)
+            .exclude(name__in=designation_map.keys())
+            .values_list('name', flat=True)
+        )
+        stuck_names = [name for name in stuck_names if ' ' not in name and '/' not in name]
+        if not stuck_names:
+            return {}
+
+        self.stdout.write(f'  Falling back to {len(stuck_names)} individual MPC lookup(s)...')
+        try:
+            session, csrf_token = _mpc_session_and_csrf_token()
+        except Exception as exc:
+            self.stdout.write(self.style.WARNING(f'  Could not start an MPC lookup session: {exc}'))
+            return {}
+
+        found = {}
+        for name in stuck_names:
+            try:
+                iau_desig = _fetch_mpc_prev_designation_for(session, csrf_token, name)
+            except Exception as exc:
+                self.stdout.write(self.style.WARNING(f'  Could not look up {name} individually: {exc}'))
+                continue
+            if iau_desig:
+                found[name] = iau_desig
+        return found

@@ -11,7 +11,9 @@ from django.contrib.auth.models import AnonymousUser
 from unittest import mock
 
 from tom_jpl.jpl import ScoutDataService, ScoutDetail
-from tom_jpl.management.commands.updatescout import Command, _fetch_mpc_prev_designations
+from tom_jpl.management.commands.updatescout import (
+    Command, _fetch_mpc_prev_designations, _fetch_mpc_prev_designation_for, _mpc_session_and_csrf_token,
+)
 from tom_jpl.models import ScoutDetailHistory
 from tom_jpl.tests.factories import ScoutDetailFactory
 from tom_targets.models import Target, TargetName
@@ -1072,6 +1074,195 @@ class TestUpdateDesignations(TestCase):
         self.target.refresh_from_db()
         self.assertEqual(self.target.name, 'A11Df9S')
         self.assertFalse(TargetName.objects.filter(name='A11Df9S').exists())
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designation_for')
+    @mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token')
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designations')
+    def test_fallback_lookup_renames_a_target_missed_by_the_bulk_table(
+        self, mock_fetch, mock_session, mock_lookup
+    ):
+        # The bulk rolling table doesn't cover this target (e.g. it scrolled off during a
+        # FOMO outage), but it's already left Scout, so it's a fallback-lookup candidate.
+        self.scout_detail.active = False
+        self.scout_detail.save()
+        mock_fetch.return_value = {}
+        mock_session.return_value = ('fake-session', 'fake-token')
+        mock_lookup.return_value = '2026 LX'
+
+        self.command._update_designations(dry_run=False)
+
+        mock_lookup.assert_called_once_with('fake-session', 'fake-token', 'A11Df9S')
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, '2026 LX')
+        self.assertTrue(TargetName.objects.filter(name='A11Df9S', target=self.target).exists())
+
+
+class TestFallbackLookupDesignations(TestCase):
+    """Tests for Command._fallback_lookup_designations() in isolation."""
+
+    def setUp(self):
+        self.command = Command(stdout=StringIO())
+
+    def test_no_stuck_targets_makes_no_network_call(self):
+        ScoutDetailFactory(active=True)  # not stuck: still active on Scout
+
+        with mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token') as mock_session:
+            result = self.command._fallback_lookup_designations({})
+
+        self.assertEqual(result, {})
+        mock_session.assert_not_called()
+
+    def test_already_resolved_target_is_not_looked_up(self):
+        scout_detail = ScoutDetailFactory(active=False)
+        scout_detail.target.name = '2026 LX'  # already looks like a resolved IAU designation
+        scout_detail.target.save()
+
+        with mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token') as mock_session:
+            result = self.command._fallback_lookup_designations({})
+
+        self.assertEqual(result, {})
+        mock_session.assert_not_called()
+
+    def test_target_already_covered_by_bulk_map_is_not_looked_up(self):
+        scout_detail = ScoutDetailFactory(active=False)
+        scout_detail.target.name = 'A11Df9S'
+        scout_detail.target.save()
+
+        with mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token') as mock_session:
+            result = self.command._fallback_lookup_designations({'A11Df9S': '2026 LX'})
+
+        self.assertEqual(result, {})
+        mock_session.assert_not_called()
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designation_for')
+    @mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token')
+    def test_stuck_target_is_looked_up_individually(self, mock_session, mock_lookup):
+        scout_detail = ScoutDetailFactory(active=False)
+        scout_detail.target.name = 'A11Df9S'
+        scout_detail.target.save()
+        mock_session.return_value = ('fake-session', 'fake-token')
+        mock_lookup.return_value = '2026 LX'
+
+        result = self.command._fallback_lookup_designations({})
+
+        mock_lookup.assert_called_once_with('fake-session', 'fake-token', 'A11Df9S')
+        self.assertEqual(result, {'A11Df9S': '2026 LX'})
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designation_for')
+    @mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token')
+    def test_unresolved_individual_lookup_is_omitted(self, mock_session, mock_lookup):
+        scout_detail = ScoutDetailFactory(active=False)
+        scout_detail.target.name = 'A11Df9S'
+        scout_detail.target.save()
+        mock_session.return_value = ('fake-session', 'fake-token')
+        mock_lookup.return_value = None
+
+        result = self.command._fallback_lookup_designations({})
+
+        self.assertEqual(result, {})
+
+    @mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token')
+    def test_session_failure_does_not_raise(self, mock_session):
+        ScoutDetailFactory(active=False)
+        mock_session.side_effect = requests.ConnectionError('boom')
+
+        result = self.command._fallback_lookup_designations({})
+
+        self.assertEqual(result, {})
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designation_for')
+    @mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token')
+    def test_one_failed_lookup_does_not_stop_the_rest(self, mock_session, mock_lookup):
+        first = ScoutDetailFactory(active=False)
+        first.target.name = 'A11Df9S'
+        first.target.save()
+        second = ScoutDetailFactory(active=False)
+        second.target.name = 'ZZ99999'
+        second.target.save()
+        mock_session.return_value = ('fake-session', 'fake-token')
+
+        def side_effect(session, token, trksub):
+            if trksub == 'A11Df9S':
+                raise requests.HTTPError('boom')
+            return '2026 MY'
+
+        mock_lookup.side_effect = side_effect
+
+        result = self.command._fallback_lookup_designations({})
+
+        self.assertEqual(result, {'ZZ99999': '2026 MY'})
+
+
+class TestMpcSessionAndCsrfToken(SimpleTestCase):
+    """Tests for _mpc_session_and_csrf_token()."""
+
+    @mock.patch('tom_jpl.management.commands.updatescout.requests.Session')
+    def test_extracts_csrf_token(self, mock_session_cls):
+        mock_session = mock.Mock()
+        mock_response = mock.Mock()
+        mock_response.text = '<input type="hidden" name="csrfmiddlewaretoken" value="abc123">'
+        mock_session.get.return_value = mock_response
+        mock_session_cls.return_value = mock_session
+
+        session, token = _mpc_session_and_csrf_token()
+
+        self.assertIs(session, mock_session)
+        self.assertEqual(token, 'abc123')
+
+    @mock.patch('tom_jpl.management.commands.updatescout.requests.Session')
+    def test_raises_when_token_not_found(self, mock_session_cls):
+        mock_session = mock.Mock()
+        mock_response = mock.Mock()
+        mock_response.text = '<html>no token here</html>'
+        mock_session.get.return_value = mock_response
+        mock_session_cls.return_value = mock_session
+
+        with self.assertRaises(ValueError):
+            _mpc_session_and_csrf_token()
+
+
+class TestFetchMpcPrevDesignationFor(SimpleTestCase):
+    """Tests for _fetch_mpc_prev_designation_for(), the single-object AJAX lookup fallback."""
+
+    def test_returns_designation_when_found(self):
+        session = mock.Mock()
+        response = mock.Mock()
+        response.json.return_value = {
+            'neocp_prev_des': (
+                '<table><tr><td>A11Df9S</td><td>2026 LX</td><td>None</td>'
+                '<td>None</td><td>2026-06-15T00:00:00</td></tr></table>'
+            )
+        }
+        session.post.return_value = response
+
+        result = _fetch_mpc_prev_designation_for(session, 'tok', 'A11Df9S')
+
+        self.assertEqual(result, '2026 LX')
+
+    def test_returns_none_on_error_message(self):
+        session = mock.Mock()
+        response = mock.Mock()
+        response.json.return_value = {'error_message': 'Not found'}
+        session.post.return_value = response
+
+        result = _fetch_mpc_prev_designation_for(session, 'tok', 'UNKNOWN1')
+
+        self.assertIsNone(result)
+
+    def test_returns_none_when_status_is_not_resolved(self):
+        session = mock.Mock()
+        response = mock.Mock()
+        response.json.return_value = {
+            'neocp_prev_des': (
+                '<table><tr><td>ZZ99999</td><td>None</td><td>lost</td>'
+                '<td>None</td><td>2026-06-15T00:00:00</td></tr></table>'
+            )
+        }
+        session.post.return_value = response
+
+        result = _fetch_mpc_prev_designation_for(session, 'tok', 'ZZ99999')
+
+        self.assertIsNone(result)
 
 
 class TestFetchMpcPrevDesignations(SimpleTestCase):

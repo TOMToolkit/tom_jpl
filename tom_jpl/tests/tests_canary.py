@@ -1,7 +1,9 @@
 from django.test import SimpleTestCase, tag, TestCase
 
 from tom_jpl.jpl import ScoutDataService
-from tom_jpl.management.commands.updatescout import _fetch_mpc_prev_designations
+from tom_jpl.management.commands.updatescout import (
+    _fetch_mpc_prev_designations, _fetch_mpc_prev_designation_for, _mpc_session_and_csrf_token,
+)
 
 
 @tag('canary')
@@ -89,3 +91,21 @@ class TestFetchMpcPrevDesignationsCanary(SimpleTestCase):
         for trksub, iau_desig in mapping.items():
             self.assertTrue(trksub)
             self.assertTrue(iau_desig)
+
+
+@tag('canary')
+class TestMpcFallbackLookupCanary(SimpleTestCase):
+    """Exercises the live single-object MPC lookup endpoint used as a fallback for
+    targets the rolling table doesn't cover (e.g. after a longer FOMO outage).
+    """
+
+    def test_individual_lookup_agrees_with_bulk_table(self):
+        bulk_map = _fetch_mpc_prev_designations()
+        if not bulk_map:
+            self.skipTest('No resolved designations on the live MPC page right now.')
+        trksub, expected_desig = next(iter(bulk_map.items()))
+
+        session, csrf_token = _mpc_session_and_csrf_token()
+        result = _fetch_mpc_prev_designation_for(session, csrf_token, trksub)
+
+        self.assertEqual(result, expected_desig)
