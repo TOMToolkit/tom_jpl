@@ -1188,9 +1188,43 @@ class TestFallbackLookupDesignations(TestCase):
 
         mock_lookup.side_effect = side_effect
 
-        result = self.command._fallback_lookup_designations({})
+        result = self.command._fallback_lookup_designations({}, delay=0)
 
         self.assertEqual(result, {'ZZ99999': '2026 MY'})
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designation_for')
+    @mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token')
+    def test_lookups_are_capped_per_run(self, mock_session, mock_lookup):
+        for i in range(5):
+            detail = ScoutDetailFactory(active=False)
+            detail.target.name = f'Trk{i:04d}'
+            detail.target.save()
+        mock_session.return_value = ('fake-session', 'fake-token')
+        mock_lookup.return_value = None
+
+        out = StringIO()
+        self.command.stdout = out
+        self.command._fallback_lookup_designations({}, max_lookups=2, delay=0)
+
+        self.assertEqual(mock_lookup.call_count, 2)
+        self.assertIn('only attempting 2', out.getvalue())
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designation_for')
+    @mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token')
+    def test_delay_is_applied_between_lookups_but_not_before_the_first(self, mock_session, mock_lookup):
+        first = ScoutDetailFactory(active=False)
+        first.target.name = 'A11Df9S'
+        first.target.save()
+        second = ScoutDetailFactory(active=False)
+        second.target.name = 'ZZ99999'
+        second.target.save()
+        mock_session.return_value = ('fake-session', 'fake-token')
+        mock_lookup.return_value = None
+
+        with mock.patch('tom_jpl.management.commands.updatescout.time.sleep') as mock_sleep:
+            self.command._fallback_lookup_designations({}, delay=1.0)
+
+        mock_sleep.assert_called_once_with(1.0)
 
 
 class TestMpcSessionAndCsrfToken(SimpleTestCase):

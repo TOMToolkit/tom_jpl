@@ -20,6 +20,7 @@ Suitable for running from cron.
 
 import re
 import requests
+import time
 from html.parser import HTMLParser
 
 from django.core.management.base import BaseCommand
@@ -167,13 +168,33 @@ class Command(BaseCommand):
             action='store_true',
             help='Report what would happen without writing to the database.',
         )
+        parser.add_argument(
+            '--max-fallback-lookups',
+            type=int,
+            default=50,
+            help='Maximum number of individual MPC lookups to attempt per run (default: 50). '
+                 'Bounds how many requests are sent to the MPC server in one invocation; a large '
+                 'backlog of unresolved targets is worked down gradually across multiple runs '
+                 'rather than all at once.',
+        )
+        parser.add_argument(
+            '--fallback-lookup-delay',
+            type=float,
+            default=1.0,
+            help='Seconds to sleep between individual MPC lookups (default: 1.0), to avoid '
+                 'hammering the MPC server.',
+        )
 
     def handle(self, *args, **options):
         dry_run = options['dry_run']
         if not options['skip_reconcile']:
             self._reconcile(dry_run=dry_run)
         if not options['skip_designations']:
-            self._update_designations(dry_run=dry_run)
+            self._update_designations(
+                dry_run=dry_run,
+                max_fallback_lookups=options['max_fallback_lookups'],
+                fallback_lookup_delay=options['fallback_lookup_delay'],
+            )
 
     def _reconcile(self, dry_run=False):
         """Re-check every active Scout candidate individually and retire departed ones."""
@@ -212,7 +233,7 @@ class Command(BaseCommand):
             self.style.SUCCESS(f'  {verb} {refreshed} candidate(s); {retire_verb} {retired} candidate(s).')
         )
 
-    def _update_designations(self, dry_run=False):
+    def _update_designations(self, dry_run=False, max_fallback_lookups=50, fallback_lookup_delay=1.0):
         """Promote a Scout target's Target.name to its official IAU designation once assigned.
 
         The MPC "Previous NEOCP Objects" page maps the original Scout tracking-submission
@@ -230,7 +251,11 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING(f'  Could not fetch MPC designations: {exc}'))
             designation_map = {}
 
-        designation_map.update(self._fallback_lookup_designations(designation_map))
+        designation_map.update(
+            self._fallback_lookup_designations(
+                designation_map, max_lookups=max_fallback_lookups, delay=fallback_lookup_delay
+            )
+        )
 
         if not designation_map:
             self.stdout.write('  No designations returned from MPC.')
@@ -278,7 +303,7 @@ class Command(BaseCommand):
         else:
             self.stdout.write('  No new designations to record.')
 
-    def _fallback_lookup_designations(self, designation_map):
+    def _fallback_lookup_designations(self, designation_map, max_lookups=50, delay=1.0):
         """Individually re-check already-inactive Scout targets the rolling table doesn't
         cover -- e.g. after a FOMO outage longer than that ~100-entry window spans.
 
@@ -288,6 +313,12 @@ class Command(BaseCommand):
         looked up again on every run forever. Returns a dict to merge into the caller's
         designation_map; never raises, so one failed lookup (or an unreachable MPC page)
         doesn't stop the rest of _update_designations from using the bulk-table results.
+
+        The number of individual lookups is capped at ``max_lookups`` per call, with
+        ``delay`` seconds between each, to avoid sending a burst of requests to the MPC
+        server -- a large backlog (e.g. the first run after this fallback was added, with
+        no cap the whole thing would fire at once) is worked down gradually across
+        multiple runs instead.
         """
         from tom_targets.models import Target
 
@@ -300,6 +331,17 @@ class Command(BaseCommand):
         if not stuck_names:
             return {}
 
+        total_stuck = len(stuck_names)
+        if total_stuck > max_lookups:
+            stuck_names = stuck_names[:max_lookups]
+            self.stdout.write(
+                self.style.WARNING(
+                    f'  {total_stuck} target(s) need an individual MPC lookup; only attempting '
+                    f'{max_lookups} this run to avoid hammering the MPC server. The rest will be '
+                    f'picked up on a later run.'
+                )
+            )
+
         self.stdout.write(f'  Falling back to {len(stuck_names)} individual MPC lookup(s)...')
         try:
             session, csrf_token = _mpc_session_and_csrf_token()
@@ -308,7 +350,9 @@ class Command(BaseCommand):
             return {}
 
         found = {}
-        for name in stuck_names:
+        for i, name in enumerate(stuck_names):
+            if i > 0 and delay:
+                time.sleep(delay)
             try:
                 iau_desig = _fetch_mpc_prev_designation_for(session, csrf_token, name)
             except Exception as exc:
