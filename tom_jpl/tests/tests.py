@@ -1129,6 +1129,23 @@ class TestFetchMpcPrevDesignations(SimpleTestCase):
         self.assertNotIn('ST26F44', mapping)
 
     @mock.patch('tom_jpl.management.commands.updatescout.requests.get')
+    def test_unrecognized_status_is_excluded_by_default(self, mock_get):
+        # An object with a status this code has never seen before, but with what looks like a
+        # real designation in iau_desig. Whitelisting the "clean" status value means this is
+        # excluded rather than silently let through -- unlike a blacklist of known-bad statuses,
+        # which would have no way to know this new one is bad.
+        html = """
+        <table>
+          <tr><td>Z99Xy1A</td><td>2026 ZZ9</td><td>impacted</td><td>None</td><td>2026-08-14T00:00:00</td></tr>
+        </table>
+        """
+        mock_get.return_value = self._mock_response(html)
+
+        mapping = _fetch_mpc_prev_designations()
+
+        self.assertEqual(mapping, {})
+
+    @mock.patch('tom_jpl.management.commands.updatescout.requests.get')
     def test_empty_table_returns_empty_mapping(self, mock_get):
         mock_get.return_value = self._mock_response('<table></table>')
 

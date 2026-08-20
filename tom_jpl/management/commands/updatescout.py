@@ -76,11 +76,21 @@ def _fetch_mpc_prev_designations():
 
     mapping = {}
     for row in parser.rows:
-        if len(row) < 2:
+        if len(row) < 3:
             continue
         trksub = row[0].strip()
         iau_desig = row[1].strip()
-        # Skip header rows and rows where no real designation was assigned
+        status = row[2].strip()
+        # The 'status' column is the page's own authoritative signal for why an object left
+        # the NEOCP: empty/'None' means it was resolved with a real designation, anything else
+        # (lost/dne/ns/na/...) means it wasn't. Whitelisting the "clean" value rather than
+        # blacklisting known-bad ones means a status value we haven't seen before is excluded
+        # by default, instead of silently falling through.
+        if status not in ('', 'None'):
+            continue
+        # Skip header rows. A "clean" status doesn't guarantee a real designation was assigned
+        # (e.g. an object can be neither lost/dne nor yet-designated), so iau_desig itself still
+        # needs its own placeholder check.
         if not trksub or not iau_desig:
             continue
         if iau_desig in ('—', '–', '-', 'None', 'iau_desig'):
