@@ -390,6 +390,24 @@ class TestParseRaToDegrees(SimpleTestCase):
         self.assertIsNone(ScoutDataService._parse_ra_to_degrees('25:00'))
 
 
+class TestParseUtcDatetime(SimpleTestCase):
+    """Tests for ScoutDataService._parse_utc_datetime(), backed by django.utils.timezone.make_aware."""
+
+    def test_none_returns_none(self):
+        self.assertIsNone(ScoutDataService._parse_utc_datetime(None))
+
+    def test_naive_string_is_attached_utc(self):
+        # This is the real Scout format: no offset in the string at all.
+        result = ScoutDataService._parse_utc_datetime('2026-02-11 16:30')
+        self.assertEqual(result, datetime(2026, 2, 11, 16, 30, tzinfo=tzutc()))
+
+    def test_already_offset_string_raises_instead_of_silently_mislabeling(self):
+        # Scout has never sent this, but if it ever did, blindly relabeling '16:30-05:00' as
+        # '16:30 UTC' (5 hours off from the true instant) must not pass silently.
+        with self.assertRaises(ValueError):
+            ScoutDataService._parse_utc_datetime('2026-02-11T16:30:00-05:00')
+
+
 class TestParseDetailData(SimpleTestCase):
     """Tests for ScoutDataService._parse_detail_data()"""
 

@@ -1,6 +1,6 @@
+from datetime import timezone
 from math import sqrt, degrees
 from dateutil.parser import parse
-from dateutil.tz import tzutc
 import logging
 import requests
 
@@ -8,6 +8,7 @@ from astropy import units as u
 from astropy.constants import GM_sun, au
 from astropy.coordinates import Angle
 from django.contrib import messages
+from django.utils.timezone import make_aware
 
 from tom_dataservices.dataservices import DataService
 from tom_targets.models import Target
@@ -317,6 +318,21 @@ class ScoutDataService(DataService):
         except (ValueError, TypeError):
             return None
 
+    @staticmethod
+    def _parse_utc_datetime(value):
+        """Parse a Scout timestamp string into an aware UTC datetime.
+
+        Scout's timestamps are documented as UTC with no offset in the string, so
+        dateutil.parser.parse() returns a naive datetime; make_aware() attaches UTC to
+        it. Unlike a plain `.replace(tzinfo=...)`, make_aware() raises ValueError rather
+        than silently mislabeling the value if Scout ever starts sending an
+        already-offset-aware string instead -- a loud failure beats a silently wrong
+        timestamp.
+        """
+        if value is None:
+            return None
+        return make_aware(parse(value), timezone.utc)
+
     def _parse_detail_data(self, query_results, **kwargs):
         """Parse and coerce relevant fields from a per-object query result to create a dictionary of reduced datums.
         (These aren't really "reduced datums" in the sense of being derived from the raw data, but a
@@ -343,10 +359,8 @@ class ScoutDataService(DataService):
             'rate': self._safe_float(query_results.get('rate')),
             'ra': self._parse_ra_to_degrees(query_results.get('ra')),
             'dec': self._safe_float(query_results.get('dec')),
-            't_ephem': parse(query_results.get('tEphem')).replace(tzinfo=tzutc()) if query_results.get('tEphem')
-            else None,
-            'last_run': parse(query_results.get('lastRun')).replace(tzinfo=tzutc()) if query_results.get('lastRun')
-            else None
+            't_ephem': self._parse_utc_datetime(query_results.get('tEphem')),
+            'last_run': self._parse_utc_datetime(query_results.get('lastRun'))
         }
         return scout_detail
 
