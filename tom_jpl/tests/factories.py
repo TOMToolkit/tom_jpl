@@ -1,7 +1,7 @@
 import factory
 
 from tom_targets.models import Target
-from tom_jpl.models import ScoutDetail
+from tom_jpl.models import ScoutDetail, ScoutDetailHistory
 
 
 class SiderealTargetFactory(factory.django.DjangoModelFactory):
@@ -59,3 +59,8 @@ class ScoutDetailFactory(factory.django.DjangoModelFactory):
     dec = factory.Faker('pyfloat', min_value=-90, max_value=90, right_digits=4)
     t_ephem = factory.Faker('date_time_this_year')
     last_run = factory.Faker('date_time_this_year')
+
+
+class ScoutDetailHistoryFactory(ScoutDetailFactory):
+    class Meta:
+        model = ScoutDetailHistory

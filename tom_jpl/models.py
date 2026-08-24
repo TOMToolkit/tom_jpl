@@ -3,6 +3,11 @@ from django.forms.models import model_to_dict
 
 from tom_targets.models import BaseTarget
 
+# Fields ignored by the history change-detection: identifiers/timestamps, plus the
+# ephemeris quantities (ra, dec, vmag, rate, t_ephem) which change on every Scout run
+# by definition and would drown out the interesting orbit-quality changes.
+HISTORY_UNTRACKED_FIELDS = {'id', 'target', 'last_run', 'ra', 'dec', 'vmag', 'rate', 't_ephem'}
+
 
 class BaseScoutDetail(models.Model):
     """Abstract base holding the Scout snapshot fields shared by the current-state
@@ -85,3 +90,15 @@ class ScoutDetailHistory(BaseScoutDetail):
 
     def __str__(self):
         return self.target.name + f' (lastRun: {self.last_run})'
+
+    def changes_from(self, previous):
+        """Return the tracked fields that differ from `previous` as {field_name: (old, new)}.
+
+        Fields in HISTORY_UNTRACKED_FIELDS are ignored. Returns an empty dict when
+        `previous` is None (i.e. this is the first Scout record for the target).
+        """
+        if previous is None:
+            return {}
+        old = previous.as_dict()
+        return {field: (old[field], value) for field, value in self.as_dict().items()
+                if field not in HISTORY_UNTRACKED_FIELDS and value != old[field]}

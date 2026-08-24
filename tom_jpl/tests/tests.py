@@ -15,7 +15,7 @@ from tom_jpl.management.commands.updatescout import (
     Command, _fetch_mpc_prev_designations, _fetch_mpc_prev_designation_for, _mpc_session_and_csrf_token,
 )
 from tom_jpl.models import ScoutDetailHistory
-from tom_jpl.tests.factories import ScoutDetailFactory
+from tom_jpl.tests.factories import NonSiderealTargetFactory, ScoutDetailFactory, ScoutDetailHistoryFactory
 from tom_targets.models import Target, TargetName
 
 
@@ -796,6 +796,44 @@ class ScoutDetailsPartialTest(TestCase):
         rendered = self._render_partial(scoutdetail)
         self.assertIn('NEO', rendered)
         self.assertIn('78', rendered)
+
+
+# Fixed values for every field tracked by the history change-detection, so tests can
+# create history rows that differ only in the fields they explicitly override.
+_TRACKED_FIELD_VALUES = {
+    'num_obs': 10, 'neo_score': 85, 'neo1km_score': 5, 'pha_score': 20, 'ieo_score': 0,
+    'geocentric_score': 1, 'impact_rating': 1, 'ca_dist': 3.5, 'arc': 2.8, 'rms': 0.42,
+    'uncertainty': 25.0, 'uncertainty_p1': 40.0,
+}
+
+
+class ScoutDetailHistoryChangesTest(TestCase):
+    """Tests for ScoutDetailHistory.changes_from()."""
+
+    def setUp(self):
+        self.target = NonSiderealTargetFactory()
+
+    def _history_row(self, last_run, **overrides):
+        values = {**_TRACKED_FIELD_VALUES, **overrides}
+        return ScoutDetailHistoryFactory(target=self.target, last_run=last_run, **values)
+
+    def test_no_previous_row_yields_no_changes(self):
+        row = self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()))
+        self.assertEqual(row.changes_from(None), {})
+
+    def test_detects_changed_tracked_fields(self):
+        older = self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()))
+        newer = self._history_row(datetime(2026, 7, 2, tzinfo=tzutc()), neo_score=92, rms=0.38)
+        self.assertEqual(newer.changes_from(older), {'neo_score': (85, 92), 'rms': (0.42, 0.38)})
+
+    def test_ignores_ephemeris_and_untracked_fields(self):
+        older = self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()),
+                                  ra=10.0, dec=-5.0, vmag=21.5, rate=1.2,
+                                  t_ephem=datetime(2026, 7, 1, tzinfo=tzutc()))
+        newer = self._history_row(datetime(2026, 7, 2, tzinfo=tzutc()),
+                                  ra=11.0, dec=-6.0, vmag=22.0, rate=2.4,
+                                  t_ephem=datetime(2026, 7, 2, tzinfo=tzutc()))
+        self.assertEqual(newer.changes_from(older), {})
 
 
 # Scout API signature expected by query_service().
