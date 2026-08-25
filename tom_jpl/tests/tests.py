@@ -19,6 +19,11 @@ from tom_jpl.tests.factories import NonSiderealTargetFactory, ScoutDetailFactory
 from tom_targets.models import Target, TargetName
 
 
+def make_designation_row(iau_desig=None, status='None', reference=None, datetime_ut=None):
+    """Build one value of the dict `_parse_designation_rows` returns (a whole table row)."""
+    return {'iau_desig': iau_desig, 'status': status, 'reference': reference, 'datetime_ut': datetime_ut}
+
+
 def make_result(overrides=None):
     """Return a minimal valid Scout result dict, with optional field overrides."""
     base = {
@@ -1069,7 +1074,7 @@ class TestUpdateDesignations(TestCase):
 
     @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designations')
     def test_renames_target_and_keeps_provisional_as_alias(self, mock_fetch):
-        mock_fetch.return_value = {'A11Df9S': '2026 LX'}
+        mock_fetch.return_value = {'A11Df9S': make_designation_row('2026 LX')}
 
         self.command._update_designations(dry_run=False)
 
@@ -1079,7 +1084,7 @@ class TestUpdateDesignations(TestCase):
 
     @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designations')
     def test_dry_run_reports_without_writing(self, mock_fetch):
-        mock_fetch.return_value = {'A11Df9S': '2026 LX'}
+        mock_fetch.return_value = {'A11Df9S': make_designation_row('2026 LX')}
 
         self.command._update_designations(dry_run=True)
 
@@ -1091,7 +1096,8 @@ class TestUpdateDesignations(TestCase):
     def test_ignores_targets_without_scout_detail(self, mock_fetch):
         # A target whose name matches the MPC mapping but was never ingested via Scout.
         other = Target.objects.create(name='A22Eg0T', type=Target.NON_SIDEREAL)
-        mock_fetch.return_value = {'A11Df9S': '2026 LX', 'A22Eg0T': '2026 MY'}
+        mock_fetch.return_value = {'A11Df9S': make_designation_row('2026 LX'),
+                                   'A22Eg0T': make_designation_row('2026 MY')}
 
         self.command._update_designations(dry_run=False)
 
@@ -1105,7 +1111,7 @@ class TestUpdateDesignations(TestCase):
         # Another target already carries the designation the mapping wants to assign here;
         # renaming would collide with Target.name's uniqueness constraint, so it's skipped.
         Target.objects.create(name='2026 LX', type=Target.NON_SIDEREAL)
-        mock_fetch.return_value = {'A11Df9S': '2026 LX'}
+        mock_fetch.return_value = {'A11Df9S': make_designation_row('2026 LX')}
 
         self.command._update_designations(dry_run=False)
 
@@ -1125,7 +1131,7 @@ class TestUpdateDesignations(TestCase):
         self.scout_detail.save()
         mock_fetch.return_value = {}
         mock_session.return_value = ('fake-session', 'fake-token')
-        mock_lookup.return_value = '2026 LX'
+        mock_lookup.return_value = make_designation_row('2026 LX')
 
         self.command._update_designations(dry_run=False)
 
@@ -1179,12 +1185,12 @@ class TestFallbackLookupDesignations(TestCase):
         scout_detail.target.name = 'A11Df9S'
         scout_detail.target.save()
         mock_session.return_value = ('fake-session', 'fake-token')
-        mock_lookup.return_value = '2026 LX'
+        mock_lookup.return_value = make_designation_row('2026 LX')
 
         result = self.command._fallback_lookup_designations({})
 
         mock_lookup.assert_called_once_with('fake-session', 'fake-token', 'A11Df9S')
-        self.assertEqual(result, {'A11Df9S': '2026 LX'})
+        self.assertEqual(result, {'A11Df9S': make_designation_row('2026 LX')})
 
     @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designation_for')
     @mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token')
@@ -1222,13 +1228,13 @@ class TestFallbackLookupDesignations(TestCase):
         def side_effect(session, token, trksub):
             if trksub == 'A11Df9S':
                 raise requests.HTTPError('boom')
-            return '2026 MY'
+            return make_designation_row('2026 MY')
 
         mock_lookup.side_effect = side_effect
 
         result = self.command._fallback_lookup_designations({}, delay=0)
 
-        self.assertEqual(result, {'ZZ99999': '2026 MY'})
+        self.assertEqual(result, {'ZZ99999': make_designation_row('2026 MY')})
 
     @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designation_for')
     @mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token')
@@ -1309,7 +1315,7 @@ class TestFetchMpcPrevDesignationFor(SimpleTestCase):
 
         result = _fetch_mpc_prev_designation_for(session, 'tok', 'A11Df9S')
 
-        self.assertEqual(result, '2026 LX')
+        self.assertEqual(result, make_designation_row('2026 LX', datetime_ut='2026-06-15T00:00:00'))
 
     def test_returns_none_on_error_message(self):
         session = mock.Mock()
@@ -1321,7 +1327,7 @@ class TestFetchMpcPrevDesignationFor(SimpleTestCase):
 
         self.assertIsNone(result)
 
-    def test_returns_none_when_status_is_not_resolved(self):
+    def test_returns_the_row_without_a_designation_when_not_resolved(self):
         session = mock.Mock()
         response = mock.Mock()
         response.json.return_value = {
@@ -1332,9 +1338,11 @@ class TestFetchMpcPrevDesignationFor(SimpleTestCase):
         }
         session.post.return_value = response
 
+        # A lost object still has provenance worth returning -- why it left, and when. It is
+        # the caller's job to notice there is no designation to rename to.
         result = _fetch_mpc_prev_designation_for(session, 'tok', 'ZZ99999')
 
-        self.assertIsNone(result)
+        self.assertEqual(result, make_designation_row(status='lost', datetime_ut='2026-06-15T00:00:00'))
 
 
 class TestFetchMpcPrevDesignations(SimpleTestCase):
@@ -1342,7 +1350,9 @@ class TestFetchMpcPrevDesignations(SimpleTestCase):
 
     The live MPC page is mocked at the ``requests.get`` boundary so this exercises the
     real HTML-table parsing and row-filtering logic (header rows, dash/None placeholders,
-    short rows, empty cells) without a network call.
+    short rows, empty cells) without a network call. Every row with a recognised status is
+    returned whole -- designation, status, reference and timestamp -- not just the ones
+    that were designated.
     """
 
     # Mirrors the real 5-column NEOCP page (trksub, iau_desig, status, reference, datetime_ut)
@@ -1372,24 +1382,51 @@ class TestFetchMpcPrevDesignations(SimpleTestCase):
         return response
 
     @mock.patch('tom_jpl.management.commands.updatescout.requests.get')
-    def test_parses_only_real_designations(self, mock_get):
+    def test_parses_designations_with_their_status_and_reference(self, mock_get):
         mock_get.return_value = self._mock_response(self.SAMPLE_HTML)
 
         mapping = _fetch_mpc_prev_designations()
 
-        # Asteroid AND comet designations are kept; lost/dne ("None"), dash placeholders,
-        # header rows, short rows and empty-trksub rows are all filtered out.
+        # Asteroid AND comet designations are kept, each carrying the rest of its row.
         self.assertEqual(
-            mapping,
-            {
-                'ST26F43': '2026 LW2',
-                'P12nn8G': 'C/2026 L2',  # comet designation is aliased like any other
-                'A11DnRU': '2026 LS1',
-            },
+            mapping['ST26F43'],
+            make_designation_row('2026 LW2', reference='MPEC 2026-L105', datetime_ut='2026-06-15T21:36:25'),
         )
-        # lost / dne objects (iau_desig == "None") are excluded.
-        self.assertNotIn('ML81524', mapping)
-        self.assertNotIn('ST26F44', mapping)
+        # A comet designation is treated like any other.
+        self.assertEqual(mapping['P12nn8G']['iau_desig'], 'C/2026 L2')
+        # A designation can be assigned before its MPEC is published, so a missing reference
+        # must not cost the row its designation.
+        self.assertEqual(mapping['A11DnRU']['iau_desig'], '2026 LS1')
+        self.assertIsNone(mapping['A11DnRU']['reference'])
+
+    @mock.patch('tom_jpl.management.commands.updatescout.requests.get')
+    def test_undesignated_objects_are_kept_with_their_reason(self, mock_get):
+        # Objects that left without a designation are the point of returning whole rows: the
+        # status records *why*, which is only on the page while the row is inside its rolling
+        # ~100-entry window. Callers that only want renames skip these on iau_desig being None.
+        mock_get.return_value = self._mock_response(self.SAMPLE_HTML)
+
+        mapping = _fetch_mpc_prev_designations()
+
+        self.assertEqual(mapping['ML81524']['status'], 'lost')
+        self.assertIsNone(mapping['ML81524']['iau_desig'])
+        self.assertEqual(mapping['ST26F44']['status'], 'dne')
+        self.assertIsNone(mapping['ST26F44']['iau_desig'])
+
+    @mock.patch('tom_jpl.management.commands.updatescout.requests.get')
+    def test_placeholder_and_malformed_rows_are_excluded(self, mock_get):
+        mock_get.return_value = self._mock_response(self.SAMPLE_HTML)
+
+        mapping = _fetch_mpc_prev_designations()
+
+        # Header rows (status cell holds the literal 'status'), single-cell rows and
+        # empty-trksub rows never make it in.
+        self.assertNotIn('trksub', mapping)
+        self.assertNotIn('OnlyOneCell', mapping)
+        self.assertNotIn('', mapping)
+        # Dash placeholders in iau_desig become None rather than a literal '-'.
+        self.assertIsNone(mapping['A33Zz9Q']['iau_desig'])
+        self.assertIsNone(mapping['A44Yy8P']['iau_desig'])
 
     @mock.patch('tom_jpl.management.commands.updatescout.requests.get')
     def test_unrecognized_status_is_excluded_by_default(self, mock_get):

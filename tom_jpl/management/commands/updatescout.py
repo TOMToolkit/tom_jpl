@@ -61,12 +61,47 @@ class _TableParser(HTMLParser):
             self._row[-1] += data
 
 
+# Known values of the page's 'status' column, paired with what each one means. Empty/'None'
+# is the page's signal that the object was resolved normally; the rest are the ways it can
+# leave the NEOCP without a designation. The 'na'/'ns' distinction is MPC's published
+# artificial-satellite policy: a tracklet whose motion matches the two-line element set of a
+# known artificial object is removed as 'na', while one that can't be matched but has a
+# geocentric score > 10 is only flagged 'ns'.
+#
+# Note the column is also sometimes another tracklet's trksub, meaning the two were identified
+# with each other. Those rows aren't kept -- validating against this whitelist rather than
+# blacklisting known-bad values means anything unrecognised (a new MPC status, or one of those
+# trksubs) is skipped by default instead of silently misread as something it isn't.
+_MPC_STATUSES = (
+    ('None', 'designated'),
+    ('lost', 'was not confirmed'),
+    ('dne', 'does not exist'),
+    ('na', 'not a minor planet (matched to a known artificial satellite)'),
+    ('ns', 'suspected artificial (geocentric orbit, no match to a known satellite)'),
+)
+_KNOWN_MPC_STATUSES = frozenset(status for status, _ in _MPC_STATUSES)
+
+# How the page renders an empty cell.
+_MPC_EMPTY_CELLS = ('', '\u2014', '\u2013', '-', 'None')
+
+
+def _clean_cell(value):
+    """Strip a table cell, returning None for MPC's various renderings of "empty"."""
+    text = (value or '').strip()
+    return None if text in _MPC_EMPTY_CELLS else text
+
+
 def _parse_designation_rows(html):
     """Parse an MPC 'Previous NEOCP Objects' table (full page or single-result AJAX
-    fragment -- both share the same 5-column row shape) into a dict ``{trksub:
-    iau_desig}`` for rows that represent a real IAU provisional designation. Objects
-    with status ``lost``, ``dne``, etc. are excluded. Shared by the bulk rolling-table
-    fetch and the individual-object fallback lookup.
+    fragment -- both share the same 5-column row shape) into a dict keyed by trksub, whose
+    values carry the whole row: the IAU designation (None unless one was assigned), the
+    status saying why the object left, the announcing reference, and MPC's own timestamp
+    for the departure. Rows whose status isn't recognised are excluded. Shared by the bulk
+    rolling-table fetch and the individual-object fallback lookup.
+
+    Callers wanting only renamed objects should skip entries whose ``iau_desig`` is None:
+    a "clean" status doesn't guarantee a designation was assigned, and the objects that
+    left as lost/dne/na/ns never have one.
     """
     parser = _TableParser()
     parser.feed(html)
@@ -75,29 +110,22 @@ def _parse_designation_rows(html):
     for row in parser.rows:
         if len(row) < 3:
             continue
-        trksub = row[0].strip()
-        iau_desig = row[1].strip()
-        status = row[2].strip()
-        # The 'status' column is the page's own authoritative signal for why an object left
-        # the NEOCP: empty/'None' means it was resolved with a real designation, anything else
-        # (lost/dne/ns/na/...) means it wasn't. Whitelisting the "clean" value rather than
-        # blacklisting known-bad ones means a status value we haven't seen before is excluded
-        # by default, instead of silently falling through.
-        if status not in ('', 'None'):
+        trksub = _clean_cell(row[0])
+        status = (row[2] or '').strip() or 'None'
+        # Skips header rows too, whose status cell holds the literal 'status'.
+        if not trksub or status not in _KNOWN_MPC_STATUSES:
             continue
-        # Skip header rows. A "clean" status doesn't guarantee a real designation was assigned
-        # (e.g. an object can be neither lost/dne nor yet-designated), so iau_desig itself still
-        # needs its own placeholder check.
-        if not trksub or not iau_desig:
-            continue
-        if iau_desig in ('—', '–', '-', 'None', 'iau_desig'):
-            continue
-        mapping[trksub] = iau_desig
+        mapping[trksub] = {
+            'iau_desig': _clean_cell(row[1]),
+            'status': status,
+            'reference': _clean_cell(row[3]) if len(row) > 3 else None,
+            'datetime_ut': _clean_cell(row[4]) if len(row) > 4 else None,
+        }
     return mapping
 
 
 def _fetch_mpc_prev_designations():
-    """Fetch the 100 most-recent NEOCP-to-official-designation mappings from the MPC.
+    """Fetch the 100 most-recent NEOCP departures from the MPC, keyed by trksub.
 
     Parses the HTML table at :data:`_MPC_PREV_DES_URL`. Network or parse failures
     propagate as exceptions; callers should catch and warn rather than abort.
@@ -129,9 +157,10 @@ def _fetch_mpc_prev_designation_for(session, csrf_token, trksub):
     :func:`_fetch_mpc_prev_designations` scrapes -- e.g. after a FOMO outage longer
     than that window covers. Submits the same AJAX request the page's own "Submit"
     button does (a POST to the page's own URL, since the visible button is JS-driven
-    rather than a plain form submit) and returns the IAU designation string, or None
-    if the object isn't found or hasn't been resolved yet. Network/parse failures
-    propagate; callers should catch per-lookup so one failure doesn't abort the rest.
+    rather than a plain form submit) and returns that object's row as
+    :func:`_parse_designation_rows` builds it, or None if the object isn't found.
+    Network/parse failures propagate; callers should catch per-lookup so one failure
+    doesn't abort the rest.
     """
     response = session.post(
         _MPC_PREV_DES_URL,
@@ -267,7 +296,10 @@ class Command(BaseCommand):
 
         updated = 0
         for target in scout_targets:
-            iau_desig = designation_map[target.name]
+            iau_desig = designation_map[target.name]['iau_desig']
+            if not iau_desig:
+                # Known to have left the NEOCP, but without a designation to rename to.
+                continue
             old_name = target.name
 
             # Another target already claims this designation (or it's already been recorded
@@ -354,10 +386,10 @@ class Command(BaseCommand):
             if i > 0 and delay:
                 time.sleep(delay)
             try:
-                iau_desig = _fetch_mpc_prev_designation_for(session, csrf_token, name)
+                designation_row = _fetch_mpc_prev_designation_for(session, csrf_token, name)
             except Exception as exc:
                 self.stdout.write(self.style.WARNING(f'  Could not look up {name} individually: {exc}'))
                 continue
-            if iau_desig:
-                found[name] = iau_desig
+            if designation_row:
+                found[name] = designation_row
         return found
