@@ -364,6 +364,32 @@ class ScoutDataService(DataService):
         }
         return scout_detail
 
+    def store_scout_detail(self, target, detail_data):
+        """Write one Scout snapshot to a target's ScoutDetail and append it to its history.
+
+        Takes the parsed dict :meth:`_parse_detail_data` produces. That parse reads only fields
+        the summary listing already carries, so a row from an unfiltered list query stores
+        identically to a per-object response -- which is what lets reconciliation refresh from
+        the roster without a request per candidate.
+        """
+        # A target seen here for the first time is, by definition, active. But on an
+        # existing ScoutDetail row, `active` is deliberately left out of `defaults` so it's
+        # untouched: the updatescout command's reconciliation is the sole authority on
+        # whether an already-known candidate has left Scout, and a stale target_result (e.g.
+        # a cached interactive query result submitted well after the query ran) must not be
+        # able to silently resurrect one that reconciliation already marked inactive.
+        ScoutDetail.objects.update_or_create(target=target,
+                                             defaults=detail_data,
+                                             create_defaults={**detail_data, 'active': True},
+                                             )
+        if detail_data.get('last_run') is not None:
+            history_defaults = {k: v for k, v in detail_data.items() if k != 'last_run'}
+            ScoutDetailHistory.objects.get_or_create(
+                target=target,
+                last_run=detail_data['last_run'],
+                defaults=history_defaults,
+            )
+
     def to_target(self, target_result=None, **kwargs):
         """
         We need to use and manipulate several parts of the created or retrieved target object, so we need to extend
@@ -400,22 +426,5 @@ class ScoutDataService(DataService):
                 messages.success(request, f"Orbital elements for {target.name} have been updated.")
         # Finally we update or create the scout detail data
         if target and target_result and 'scout_detail' in target_result:
-            detail_data = target_result['scout_detail']
-            # A target seen here for the first time is, by definition, active. But on an
-            # existing ScoutDetail row, `active` is deliberately left out of `defaults` so it's
-            # untouched: the updatescout command's reconciliation is the sole authority on
-            # whether an already-known candidate has left Scout, and a stale target_result (e.g.
-            # a cached interactive query result submitted well after the query ran) must not be
-            # able to silently resurrect one that reconciliation already marked inactive.
-            ScoutDetail.objects.update_or_create(target=target,
-                                                 defaults=detail_data,
-                                                 create_defaults={**detail_data, 'active': True},
-                                                 )
-            if detail_data.get('last_run') is not None:
-                history_defaults = {k: v for k, v in detail_data.items() if k != 'last_run'}
-                ScoutDetailHistory.objects.get_or_create(
-                    target=target,
-                    last_run=detail_data['last_run'],
-                    defaults=history_defaults,
-                )
+            self.store_scout_detail(target, target_result['scout_detail'])
         return target

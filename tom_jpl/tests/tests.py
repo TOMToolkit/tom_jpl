@@ -968,26 +968,37 @@ class TestUpdateScoutCommand(TestCase):
 
     Ingestion of *new* candidates now goes through tom_dataservices' ``rundataquery``
     against a saved Scout ``DataServiceQuery``; this command only re-checks candidates
-    already marked ``active``, one at a time, via ``build_query_parameters_from_target``.
-    Checking each target individually (rather than diffing against one broad query's
-    results) means a target that merely stops matching some *other* query's cuts is never
-    mistaken for one that has actually left Scout.
+    already marked ``active``. Membership comes from one unconstrained Scout call: the API
+    applies no cuts of its own, so the roster it returns is the whole NEOCP and absence from
+    it means the object has genuinely left. A per-object call follows only for candidates
+    Scout has actually recomputed, because the orbital elements ``to_target`` updates are not
+    in a roster row.
     """
 
     RUBIN_PASSING_OVERRIDES = {'rating': 4, 'nObs': 8, 'arc': '2.0', 'Vmag': '21.9'}
 
-    def _run(self, tdes_response, **opts):
-        """Run the command with ``requests.get`` patched to answer any tdes-keyed query.
+    def _run(self, tdes_response, roster=None, **opts):
+        """Run the command with ``requests.get`` patched to answer both Scout call shapes.
 
-        ``tdes_response`` is either a detail-object dict (candidate still on Scout) or
-        ``None`` (Scout has no record of it any more).
+        The unconstrained roster call is answered with ``roster``; by default that is a list
+        holding just this candidate when it is still on Scout, or one unrelated object when it
+        is not -- an *empty* roster means a failed fetch rather than a mass departure, and is
+        guarded separately. A tdes-keyed call is answered with ``tdes_response``.
         """
+        if roster is None:
+            roster = [make_result()] if tdes_response is not None else [make_result({'objectName': 'OTHER01'})]
+
         def fake_get(url, data=None, **kwargs):
             response = mock.Mock()
-            if tdes_response is None:
-                response.json.return_value = {'error': 'Object not found'}
+            if data and data.get('tdes'):
+                if tdes_response is None:
+                    response.json.return_value = {'error': 'Object not found'}
+                else:
+                    response.json.return_value = dict(tdes_response, signature=_SCOUT_SIGNATURE)
             else:
-                response.json.return_value = dict(tdes_response, signature=_SCOUT_SIGNATURE)
+                response.json.return_value = {
+                    'signature': _SCOUT_SIGNATURE, 'count': len(roster), 'data': roster,
+                }
             return response
 
         out = StringIO()
@@ -996,17 +1007,21 @@ class TestUpdateScoutCommand(TestCase):
         return out.getvalue()
 
     def test_still_active_candidate_is_refreshed(self):
-        scout_detail = ScoutDetailFactory(active=True)
+        # last_run=None means we have no stored timestamp, so the roster row always counts as
+        # newer and the candidate is refreshed -- from the roster row itself, not a re-fetch.
+        scout_detail = ScoutDetailFactory(active=True, last_run=None)
         scout_detail.target.name = 'ZTF10BL'
         scout_detail.target.save()
-        detail_obj = make_result_with_orbits(self.RUBIN_PASSING_OVERRIDES)
+        roster = [make_result(self.RUBIN_PASSING_OVERRIDES)]
 
-        self._run(detail_obj, skip_designations=True)
+        out, calls = self._run_counting(roster, skip_designations=True)
 
         scout_detail.refresh_from_db()
         self.assertTrue(scout_detail.active)
         self.assertEqual(scout_detail.num_obs, 8)
         self.assertAlmostEqual(scout_detail.vmag, 21.9)
+        # The listing row carried every stored field, so no per-object call was needed.
+        self.assertEqual(len(calls), 1)
 
     def test_departed_candidate_is_marked_inactive(self):
         scout_detail = ScoutDetailFactory(active=True)
@@ -1018,6 +1033,103 @@ class TestUpdateScoutCommand(TestCase):
         scout_detail.refresh_from_db()
         self.assertFalse(scout_detail.active)
         self.assertIn('has left Scout', out)
+
+    def _run_counting(self, roster, tdes_response=None, **opts):
+        """Like ``_run`` but also returns how many Scout requests were issued."""
+        calls = []
+
+        def fake_get(url, data=None, **kwargs):
+            calls.append(dict(data or {}))
+            response = mock.Mock()
+            if data and data.get('tdes'):
+                if tdes_response is None:
+                    response.json.return_value = {'error': 'Object not found'}
+                else:
+                    response.json.return_value = dict(tdes_response, signature=_SCOUT_SIGNATURE)
+            else:
+                response.json.return_value = {
+                    'signature': _SCOUT_SIGNATURE, 'count': len(roster), 'data': roster,
+                }
+            return response
+
+        out = StringIO()
+        with mock.patch('tom_jpl.jpl.requests.get', side_effect=fake_get):
+            call_command('updatescout', stdout=out, **opts)
+        return out.getvalue(), calls
+
+    def test_unchanged_candidates_cost_a_single_request(self):
+        """The whole point of the roster diff: cost tracks churn, not the size of the pool.
+
+        Five candidates, none of which Scout has recomputed, must cost exactly one request --
+        the unconstrained roster call -- and no per-object calls at all.
+        """
+        stored_last_run = datetime(2026, 2, 11, 22, 45, tzinfo=tzutc())
+        roster = []
+        for i in range(5):
+            name = f'ZTF10B{i}'
+            detail = ScoutDetailFactory(active=True, last_run=stored_last_run)
+            detail.target.name = name
+            detail.target.save()
+            roster.append(make_result({'objectName': name}))
+
+        out, calls = self._run_counting(roster, skip_designations=True)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual([c for c in calls if c.get('tdes')], [])
+        self.assertIn('5 unchanged', out)
+
+    def test_recomputed_candidate_is_refreshed_without_extra_requests(self):
+        # One candidate has been recomputed and one has not. The recomputed one is stored from
+        # its roster row and the other is skipped -- still a single request for both.
+        stored_last_run = datetime(2026, 2, 11, 22, 45, tzinfo=tzutc())
+        for name in ('ZTF10BL', 'ZTF10BM'):
+            detail = ScoutDetailFactory(active=True, last_run=stored_last_run)
+            detail.target.name = name
+            detail.target.save()
+        roster = [
+            make_result({'objectName': 'ZTF10BL', 'lastRun': '2026-03-01 00:00', 'nObs': 8}),
+            make_result({'objectName': 'ZTF10BM'}),
+        ]
+
+        out, calls = self._run_counting(roster, skip_designations=True)
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn('1 unchanged', out)
+        self.assertEqual(ScoutDetail.objects.get(target__name='ZTF10BL').num_obs, 8)
+        self.assertEqual(ScoutDetailHistory.objects.filter(target__name='ZTF10BL').count(), 1)
+
+    def test_empty_roster_retires_nothing(self):
+        """A failed or empty fetch must never be read as "every candidate left at once"."""
+        scout_detail = ScoutDetailFactory(active=True)
+        scout_detail.target.name = 'ZTF10BL'
+        scout_detail.target.save()
+
+        out, _ = self._run_counting([], skip_designations=True)
+
+        scout_detail.refresh_from_db()
+        self.assertTrue(scout_detail.active)
+        self.assertIn('skipping reconciliation', out)
+
+    def test_truncated_roster_retires_nothing(self):
+        # Scout reports its own row count, so count != len(data) means a partial payload.
+        scout_detail = ScoutDetailFactory(active=True)
+        scout_detail.target.name = 'ZTF10BL'
+        scout_detail.target.save()
+
+        def fake_get(url, data=None, **kwargs):
+            response = mock.Mock()
+            response.json.return_value = {
+                'signature': _SCOUT_SIGNATURE, 'count': 40, 'data': [make_result({'objectName': 'OTHER01'})],
+            }
+            return response
+
+        out = StringIO()
+        with mock.patch('tom_jpl.jpl.requests.get', side_effect=fake_get):
+            call_command('updatescout', stdout=out, skip_designations=True)
+
+        scout_detail.refresh_from_db()
+        self.assertTrue(scout_detail.active)
+        self.assertIn('partial list', out.getvalue())
 
     def test_dry_run_reconcile_writes_nothing(self):
         scout_detail = ScoutDetailFactory(active=True)

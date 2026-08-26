@@ -4,12 +4,12 @@ Ingesting *new* Scout candidates is the job of tom_dataservices' ``rundataquery`
 management command run against a saved Scout ``DataServiceQuery``. This command covers
 the rest of an already-ingested candidate's lifecycle:
 
-- Reconciliation: for every target currently marked ``active`` on its ``ScoutDetail``,
-  re-query Scout for that *specific* object (via ``build_query_parameters_from_target``)
-  and refresh its ``ScoutDetail``/history if it's still there, or mark it inactive if
-  Scout no longer returns it. Checking each target individually (rather than diffing
-  against the results of one broad query) means a target that merely stops matching some
-  other query's cuts is never mistaken for one that has actually left Scout.
+- Reconciliation: fetch the current Scout roster in one unconstrained call and compare it
+  against every target marked ``active`` on its ``ScoutDetail``. Absent from the roster
+  means the object has left the NEOCP; still on it means refresh. The Scout API applies no
+  cuts of its own -- ``build_query_parameters`` forwards only ``tdes``/``orbits``, and the
+  score thresholds are ours, applied client-side in ``_passes_filters`` -- so an
+  unconstrained call returns the whole list and absence from it is unambiguous.
 - Designation lookup: query the MPC "Previous NEOCP Objects" page to find which Scout
   candidates have received an official IAU provisional designation (e.g. ``A11Df9S`` ->
   ``2026 LX``), and promote that designation to the canonical ``Target.name``, keeping the
@@ -226,20 +226,55 @@ class Command(BaseCommand):
             )
 
     def _reconcile(self, dry_run=False):
-        """Re-check every active Scout candidate individually and retire departed ones."""
-        data_service = get_data_service_class('Scout')()
-        active_details = ScoutDetail.objects.filter(active=True).select_related('target')
-        self.stdout.write(f'Reconciling {active_details.count()} active Scout candidate(s)...')
+        """Reconcile active Scout candidates against the current roster, retiring departed ones.
 
-        retired = 0
-        refreshed = 0
+        One unconstrained call returns every object currently on Scout, so membership is
+        settled with a single request instead of one per candidate. The API applies no cuts of
+        its own (see the module docstring), which is what makes absence from that list mean
+        "has left" rather than "no longer matches some query".
+
+        A candidate still on the roster is refreshed from its own roster row, which carries
+        every field ``ScoutDetail`` stores -- ``_parse_detail_data`` reads nothing a listing
+        row lacks -- so reconciliation costs exactly one request no matter how many candidates
+        are being tracked.
+
+        Orbital elements are deliberately not touched here. Those live on the ``Target`` and
+        come from the ``orbits`` array only a per-object response carries; refreshing them is
+        the ingest path's job (``rundataquery``, which already fetches per-object data for
+        every candidate passing the query's cuts). Reconciliation's concern is which
+        candidates are still on Scout and what their current scores are.
+        """
+        data_service = get_data_service_class('Scout')()
+        active_details = list(ScoutDetail.objects.filter(active=True).select_related('target'))
+        self.stdout.write(f'Reconciling {len(active_details)} active Scout candidate(s)...')
+        if not active_details:
+            return
+
+        roster = data_service.query_service(data_service.build_query_parameters({}))
+
+        # Guard the two ways a bad response could look like a mass departure. Scout is never
+        # legitimately empty, and the API reports its own row count, so a short payload is a
+        # truncated fetch rather than news. Either way, retiring the whole candidate pool on
+        # the strength of one malformed response is not a recoverable mistake -- do nothing.
+        if not roster:
+            self.stdout.write(self.style.WARNING(
+                '  Scout returned no candidates at all; skipping reconciliation rather than '
+                'retiring every target.'))
+            return
+        if data_service.total_results is not None and data_service.total_results != len(roster):
+            self.stdout.write(self.style.WARNING(
+                f'  Scout reported {data_service.total_results} candidate(s) but returned '
+                f'{len(roster)}; skipping reconciliation rather than acting on a partial list.'))
+            return
+
+        roster_rows = {row['objectName']: row for row in roster if row.get('objectName')}
+
+        retired = refreshed = unchanged = 0
         for scout_detail in active_details:
             target = scout_detail.target
-            query_parameters = data_service.build_query_parameters_from_target(target)
-            built_parameters = data_service.build_query_parameters(query_parameters)
-            target_data_list = data_service.query_service(built_parameters)
+            row = roster_rows.get(target.name)
 
-            if not target_data_list:
+            if row is None:
                 retired += 1
                 if dry_run:
                     self.stdout.write(f'  [dry-run] would retire {target.name} (no longer on Scout)')
@@ -248,19 +283,25 @@ class Command(BaseCommand):
                     self.stdout.write(f'  {target.name} has left Scout; marked inactive.')
                 continue
 
+            # lastRun is Scout's own timestamp for the orbit solution. Unchanged means Scout
+            # has not recomputed since the stored snapshot, so there is nothing new to store.
+            detail_data = data_service._parse_detail_data(row)
+            last_run = detail_data.get('last_run')
+            if last_run is not None and scout_detail.last_run is not None and last_run <= scout_detail.last_run:
+                unchanged += 1
+                continue
+
             refreshed += 1
-            if not dry_run:
-                # Reuses the same per-object parsing query_targets() applies to a fresh candidate,
-                # so a reconciliation refresh and a first ingest populate ScoutDetail identically.
-                target_data = target_data_list[0]
-                target_data['scout_detail'] = data_service._parse_detail_data(target_data)
-                data_service.to_target(target_data)
+            if dry_run:
+                self.stdout.write(f'  [dry-run] would refresh {target.name} (Scout has recomputed it)')
+                continue
+            data_service.store_scout_detail(target, detail_data)
 
         verb = 'would refresh' if dry_run else 'refreshed'
         retire_verb = 'would retire' if dry_run else 'retired'
-        self.stdout.write(
-            self.style.SUCCESS(f'  {verb} {refreshed} candidate(s); {retire_verb} {retired} candidate(s).')
-        )
+        self.stdout.write(self.style.SUCCESS(
+            f'  {verb} {refreshed} candidate(s); {retire_verb} {retired} candidate(s); '
+            f'{unchanged} unchanged.'))
 
     def _update_designations(self, dry_run=False, max_fallback_lookups=50, fallback_lookup_delay=1.0):
         """Promote a Scout target's Target.name to its official IAU designation once assigned.
