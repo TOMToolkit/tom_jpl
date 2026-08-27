@@ -177,8 +177,12 @@ def _fetch_mpc_prev_designation_for(session, csrf_token, trksub):
 
 class Command(BaseCommand):
     help = (
-        'Reconcile active Scout candidates against the live Scout API (retiring ones that have '
-        'left) and record new official IAU designations from the MPC as target aliases.'
+        'Reconcile active Scout candidates against the live Scout API, retiring those that have '
+        'left, and record new official IAU designations from the MPC. Designations come from the '
+        'MPC Previous NEOCP Objects page, a rolling table of only ~100 departures that normally '
+        'covers about a week, so run this at least once a day to stay inside that window. A target '
+        'that left the NEOCP without appearing in that table is looked up individually against the '
+        'MPC search form instead, rate-limited by --max-fallback-lookups and --fallback-lookup-delay.'
     )
 
     def add_arguments(self, parser):
