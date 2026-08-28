@@ -782,7 +782,7 @@ class ScoutDetailsPartialTest(TestCase):
     def _render_partial(self, scoutdetail):
         return render_to_string(
             'tom_jpl/partials/scoutdetails_partial.html',
-            {'scoutdetail': scoutdetail}
+            tab_context({'target': scoutdetail.target})
         )
 
     def test_excludes_none_values(self):
@@ -801,6 +801,58 @@ class ScoutDetailsPartialTest(TestCase):
         rendered = self._render_partial(scoutdetail)
         self.assertIn('NEO', rendered)
         self.assertIn('78', rendered)
+
+    def test_lifecycle_fields_are_not_listed_as_raw_rows(self):
+        # The lifecycle fields render as the Outcome section, not as generic dict rows.
+        scoutdetail = ScoutDetailFactory(
+            active=False, mpc_status='designated', mpc_reference='MPEC 2026-L12',
+            mpc_status_checked=datetime(2026, 8, 28, tzinfo=tzutc()))
+        rendered = self._render_partial(scoutdetail)
+        self.assertNotIn('mpc status', rendered)
+        self.assertNotIn('merged into', rendered)
+        self.assertNotIn('active', rendered)
+
+    def test_active_candidate_shows_on_scout_badge(self):
+        scoutdetail = ScoutDetailFactory(active=True)
+        rendered = self._render_partial(scoutdetail)
+        self.assertIn('On Scout', rendered)
+        self.assertNotIn('Left Scout', rendered)
+
+    def test_designated_outcome_shows_status_and_reference(self):
+        scoutdetail = ScoutDetailFactory(active=False, mpc_status='designated',
+                                         mpc_reference='MPEC 2026-L12')
+        rendered = self._render_partial(scoutdetail)
+        self.assertIn('Left Scout', rendered)
+        self.assertIn('Received an IAU designation', rendered)
+        self.assertIn('(MPEC 2026-L12)', rendered)
+
+    def test_lost_outcome_shows_reason(self):
+        scoutdetail = ScoutDetailFactory(active=False, mpc_status='lost')
+        rendered = self._render_partial(scoutdetail)
+        self.assertIn('Was not confirmed', rendered)
+
+    def test_merged_into_links_to_the_surviving_target(self):
+        survivor = Target.objects.create(name='2026 LX', type=Target.NON_SIDEREAL)
+        scoutdetail = ScoutDetailFactory(active=False, mpc_status='designated',
+                                         merged_into='2026 LX')
+        rendered = self._render_partial(scoutdetail)
+        self.assertIn(f'/targets/{survivor.id}/', rendered)
+        self.assertIn('2026 LX</a>', rendered)
+
+    def test_unresolvable_merged_into_falls_back_to_plain_text(self):
+        scoutdetail = ScoutDetailFactory(active=False, mpc_status='designated',
+                                         merged_into='2026 ZZ9')
+        rendered = self._render_partial(scoutdetail)
+        self.assertIn('2026 ZZ9', rendered)
+        self.assertNotIn('2026 ZZ9</a>', rendered)
+
+    def test_departed_but_unsettled_candidate_shows_pending_outcome(self):
+        scoutdetail = ScoutDetailFactory(
+            active=False, mpc_status=None,
+            mpc_status_checked=datetime(2026, 8, 28, 4, 47, tzinfo=tzutc()))
+        rendered = self._render_partial(scoutdetail)
+        self.assertIn('Outcome not yet established', rendered)
+        self.assertIn('2026-08-28 04:47', rendered)
 
 
 # Fixed values for every field tracked by the history change-detection, so tests can

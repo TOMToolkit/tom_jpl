@@ -8,6 +8,10 @@ register = template.Library()
 # Number of Scout runs with changes shown in the compact log on the Scout Details tab.
 RECENT_CHANGES_LIMIT = 5
 
+# Lifecycle fields excluded from the generic field listing on the Scout Details tab;
+# they are rendered as the "Outcome" section instead of as raw dict rows.
+LIFECYCLE_FIELDS = ['active', 'mpc_status', 'mpc_status_checked', 'mpc_reference', 'merged_into']
+
 
 @register.inclusion_tag('tom_jpl/partials/scoutdetails_list.html', takes_context=True)
 def tab_context(context):
@@ -17,17 +21,22 @@ def tab_context(context):
 
     Also includes `recent_changes`: the most recent history rows (newest first) whose
     tracked fields changed relative to the previous Scout run, for the compact
-    "Recent changes" log.
+    "Recent changes" log, and `merged_into_target`: the Target this submission was folded
+    into (resolved from ScoutDetail.merged_into), for linking the Outcome section to the
+    surviving object.
     """
 
     target = context.get('target')
     try:
         scoutdetail = ScoutDetail.objects.get(target=target)
+        merged_into_target = scoutdetail.resolve_merged_into()
     except ScoutDetail.DoesNotExist:
         scoutdetail = {}
+        merged_into_target = None
     recent_changes = [row for row in ScoutDetailHistory.annotated_history(target)
                       if row.changes][:RECENT_CHANGES_LIMIT]
-    context = {'scoutdetail': scoutdetail, 'recent_changes': recent_changes}
+    context = {'scoutdetail': scoutdetail, 'recent_changes': recent_changes,
+               'merged_into_target': merged_into_target, 'lifecycle_fields': LIFECYCLE_FIELDS}
     return context
 
 
