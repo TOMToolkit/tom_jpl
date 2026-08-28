@@ -1,9 +1,7 @@
 from django.test import SimpleTestCase, tag, TestCase
 
 from tom_jpl.jpl import ScoutDataService
-from tom_jpl.management.commands.updatescout import (
-    _fetch_mpc_prev_designations, _fetch_mpc_prev_designation_for, _mpc_session_and_csrf_token,
-)
+from tom_jpl.management.commands.updatescout import _fetch_mpc_departures
 
 
 @tag('canary')
@@ -83,29 +81,22 @@ class TestScoutDataServiceCanary(TestCase):
 
 
 @tag('canary')
-class TestFetchMpcPrevDesignationsCanary(SimpleTestCase):
+class TestFetchMpcDeparturesCanary(SimpleTestCase):
+    """Hits the live MPC 'Previous NEOCP Objects' page (ToConfirm_PrevDes.html) and checks
+    the parser still understands its line shapes. The page's window spans months, so a
+    healthy fetch always yields both designated and undesignated outcomes."""
+
     def test_fetches_and_parses_live_page(self):
-        mapping = _fetch_mpc_prev_designations()
-        self.assertIsInstance(mapping, dict)
-        self.assertGreater(len(mapping), 0)  # page basically never has zero recent rows
-        for trksub, iau_desig in mapping.items():
+        outcomes = _fetch_mpc_departures()
+        self.assertIsInstance(outcomes, dict)
+        # Months of departures: if this is small, the page layout probably changed.
+        self.assertGreater(len(outcomes), 100)
+        statuses = {row['status'] for row in outcomes.values()}
+        self.assertIn('designated', statuses)
+        self.assertIn('lost', statuses)
+        for trksub, row in outcomes.items():
             self.assertTrue(trksub)
-            self.assertTrue(iau_desig)
-
-
-@tag('canary')
-class TestMpcFallbackLookupCanary(SimpleTestCase):
-    """Exercises the live single-object MPC lookup endpoint used as a fallback for
-    targets the rolling table doesn't cover (e.g. after a longer FOMO outage).
-    """
-
-    def test_individual_lookup_agrees_with_bulk_table(self):
-        bulk_map = _fetch_mpc_prev_designations()
-        if not bulk_map:
-            self.skipTest('No resolved designations on the live MPC page right now.')
-        trksub, expected_desig = next(iter(bulk_map.items()))
-
-        session, csrf_token = _mpc_session_and_csrf_token()
-        result = _fetch_mpc_prev_designation_for(session, csrf_token, trksub)
-
-        self.assertEqual(result, expected_desig)
+            if row['status'] == 'designated':
+                self.assertTrue(row['designation'])
+            else:
+                self.assertIsNone(row['designation'])

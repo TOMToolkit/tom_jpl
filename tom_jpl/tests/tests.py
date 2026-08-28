@@ -11,17 +11,16 @@ from django.contrib.auth.models import AnonymousUser
 from unittest import mock
 
 from tom_jpl.jpl import ScoutDataService, ScoutDetail
-from tom_jpl.management.commands.updatescout import (
-    Command, _fetch_mpc_prev_designations, _fetch_mpc_prev_designation_for, _mpc_session_and_csrf_token,
-)
+from tom_jpl.management.commands.updatescout import Command, _fetch_mpc_departures, _parse_departures
 from tom_jpl.models import ScoutDetailHistory
 from tom_jpl.tests.factories import NonSiderealTargetFactory, ScoutDetailFactory, ScoutDetailHistoryFactory
 from tom_targets.models import Target, TargetName
 
 
-def make_designation_row(iau_desig=None, status='None', reference=None, datetime_ut=None):
-    """Build one value of the dict `_parse_designation_rows` returns (a whole table row)."""
-    return {'iau_desig': iau_desig, 'status': status, 'reference': reference, 'datetime_ut': datetime_ut}
+def make_departure_row(status='designated', designation=None, reference=None, merged_into=None):
+    """Build one value of the normalized outcome dict `_parse_departures` returns."""
+    return {'status': status, 'designation': designation, 'reference': reference,
+            'merged_into': merged_into}
 
 
 def make_result(overrides=None):
@@ -1167,49 +1166,56 @@ class TestUpdateScoutCommand(TestCase):
 
 
 class TestUpdateDesignations(TestCase):
-    """``_update_designations`` promotes a Scout target's official IAU designation.
+    """``_update_designations`` settles Scout candidates from the MPC departure feed.
 
-    Regression coverage for the ``related_name='scout_detail'`` reverse-relation lookup,
-    plus the rename-on-promotion behaviour: once an object receives an official IAU
-    designation, ``Target.name`` becomes that designation (matching community convention)
-    and the original Scout provisional is kept as a ``TargetName`` alias. The real MPC
-    fetch is mocked out so this doesn't depend on a network call or on the live "Previous
-    NEOCP Objects" page containing a matching row.
+    The real fetch is mocked at the ``_fetch_mpc_departures`` boundary (the pluggable
+    transport), so these exercise the settlement logic: renaming to a new designation
+    (keeping the trksub as an alias), linking via ``merged_into`` when the designation is
+    already held, recording lost/dne/artificial outcomes with their reference, and the
+    terminal-state guarantee that a settled candidate is never reprocessed.
     """
 
     def setUp(self):
         self.command = Command(stdout=StringIO())
-        self.scout_detail = ScoutDetailFactory()
+        self.scout_detail = ScoutDetailFactory(active=False)
         self.target = self.scout_detail.target
         self.target.name = 'A11Df9S'
         self.target.save()
 
-    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designations')
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
     def test_renames_target_and_keeps_provisional_as_alias(self, mock_fetch):
-        mock_fetch.return_value = {'A11Df9S': make_designation_row('2026 LX')}
+        mock_fetch.return_value = {
+            'A11Df9S': make_departure_row(designation='2026 LX', reference='MPEC 2026-L12')}
 
         self.command._update_designations(dry_run=False)
 
         self.target.refresh_from_db()
         self.assertEqual(self.target.name, '2026 LX')
         self.assertTrue(TargetName.objects.filter(name='A11Df9S', target=self.target).exists())
+        self.scout_detail.refresh_from_db()
+        self.assertEqual(self.scout_detail.mpc_status, 'designated')
+        self.assertEqual(self.scout_detail.mpc_reference, 'MPEC 2026-L12')
+        self.assertIsNone(self.scout_detail.merged_into)
+        self.assertIsNotNone(self.scout_detail.mpc_status_checked)
 
-    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designations')
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
     def test_dry_run_reports_without_writing(self, mock_fetch):
-        mock_fetch.return_value = {'A11Df9S': make_designation_row('2026 LX')}
+        mock_fetch.return_value = {'A11Df9S': make_departure_row(designation='2026 LX')}
 
         self.command._update_designations(dry_run=True)
 
         self.target.refresh_from_db()
         self.assertEqual(self.target.name, 'A11Df9S')
         self.assertFalse(TargetName.objects.filter(name='A11Df9S').exists())
+        self.scout_detail.refresh_from_db()
+        self.assertIsNone(self.scout_detail.mpc_status)
 
-    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designations')
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
     def test_ignores_targets_without_scout_detail(self, mock_fetch):
-        # A target whose name matches the MPC mapping but was never ingested via Scout.
+        # A target whose name matches the feed but was never ingested via Scout.
         other = Target.objects.create(name='A22Eg0T', type=Target.NON_SIDEREAL)
-        mock_fetch.return_value = {'A11Df9S': make_designation_row('2026 LX'),
-                                   'A22Eg0T': make_designation_row('2026 MY')}
+        mock_fetch.return_value = {'A11Df9S': make_departure_row(designation='2026 LX'),
+                                   'A22Eg0T': make_departure_row(designation='2026 MY')}
 
         self.command._update_designations(dry_run=False)
 
@@ -1218,356 +1224,219 @@ class TestUpdateDesignations(TestCase):
         other.refresh_from_db()
         self.assertEqual(other.name, 'A22Eg0T')
 
-    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designations')
-    def test_skips_when_designation_already_claimed(self, mock_fetch):
-        # Another target already carries the designation the mapping wants to assign here;
-        # renaming would collide with Target.name's uniqueness constraint, so it's skipped.
-        Target.objects.create(name='2026 LX', type=Target.NON_SIDEREAL)
-        mock_fetch.return_value = {'A11Df9S': make_designation_row('2026 LX')}
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_claimed_designation_links_instead_of_renaming(self, mock_fetch):
+        # Another target already carries the designation (the same body ingested under a
+        # different trksub, or independently from SBDB). The name is not copied; the
+        # settlement records which object this submission became.
+        claimant = Target.objects.create(name='2026 LX', type=Target.NON_SIDEREAL)
+        mock_fetch.return_value = {'A11Df9S': make_departure_row(designation='2026 LX')}
 
         self.command._update_designations(dry_run=False)
 
         self.target.refresh_from_db()
         self.assertEqual(self.target.name, 'A11Df9S')
-        self.assertFalse(TargetName.objects.filter(name='A11Df9S').exists())
+        self.scout_detail.refresh_from_db()
+        self.assertEqual(self.scout_detail.mpc_status, 'designated')
+        self.assertEqual(self.scout_detail.merged_into, '2026 LX')
+        self.assertEqual(self.scout_detail.resolve_merged_into(), claimant)
 
-    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designation_for')
-    @mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token')
-    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designations')
-    def test_fallback_lookup_renames_a_target_missed_by_the_bulk_table(
-        self, mock_fetch, mock_session, mock_lookup
-    ):
-        # The bulk rolling table doesn't cover this target (e.g. it scrolled off during a
-        # FOMO outage), but it's already left Scout, so it's a fallback-lookup candidate.
-        self.scout_detail.active = False
-        self.scout_detail.save()
-        mock_fetch.return_value = {}
-        mock_session.return_value = ('fake-session', 'fake-token')
-        mock_lookup.return_value = make_designation_row('2026 LX')
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_own_alias_designation_is_promoted_not_skipped(self, mock_fetch):
+        # An older updatescout recorded the designation as an alias without renaming
+        # ("old style"). That alias must not block the rename as a collision: the pair is
+        # swapped so the designation becomes the name and the trksub the alias.
+        TargetName.objects.create(target=self.target, name='2026 LX')
+        mock_fetch.return_value = {'A11Df9S': make_departure_row(designation='2026 LX')}
 
         self.command._update_designations(dry_run=False)
 
-        mock_lookup.assert_called_once_with('fake-session', 'fake-token', 'A11Df9S')
         self.target.refresh_from_db()
         self.assertEqual(self.target.name, '2026 LX')
-        self.assertTrue(TargetName.objects.filter(name='A11Df9S', target=self.target).exists())
+        aliases = list(TargetName.objects.filter(target=self.target).values_list('name', flat=True))
+        self.assertEqual(aliases, ['A11Df9S'])
 
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_lost_candidate_settles_with_its_reason(self, mock_fetch):
+        mock_fetch.return_value = {'A11Df9S': make_departure_row(status='lost')}
 
-class TestFallbackLookupDesignations(TestCase):
-    """Tests for Command._fallback_lookup_designations() in isolation."""
+        self.command._update_designations(dry_run=False)
 
-    def setUp(self):
-        self.command = Command(stdout=StringIO())
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, 'A11Df9S')
+        self.scout_detail.refresh_from_db()
+        self.assertEqual(self.scout_detail.mpc_status, 'lost')
 
-    def test_no_stuck_targets_makes_no_network_call(self):
-        ScoutDetailFactory(active=True)  # not stuck: still active on Scout
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_merge_chain_outcome_records_the_surviving_identifier(self, mock_fetch):
+        # This submission was identified with another trksub which then got designated;
+        # the feed resolves the chain, and merged_into keeps the pairing.
+        mock_fetch.return_value = {'A11Df9S': make_departure_row(
+            designation='2026 LX', reference='MPEC 2026-L12', merged_into='B22Xy1Z')}
 
-        with mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token') as mock_session:
-            result = self.command._fallback_lookup_designations({})
+        self.command._update_designations(dry_run=False)
 
-        self.assertEqual(result, {})
-        mock_session.assert_not_called()
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, '2026 LX')
+        self.scout_detail.refresh_from_db()
+        self.assertEqual(self.scout_detail.merged_into, 'B22Xy1Z')
 
-    def test_already_resolved_target_is_not_looked_up(self):
-        scout_detail = ScoutDetailFactory(active=False)
-        scout_detail.target.name = '2026 LX'  # already looks like a resolved IAU designation
-        scout_detail.target.save()
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_settled_candidate_is_never_reprocessed(self, mock_fetch):
+        self.scout_detail.mpc_status = 'lost'
+        self.scout_detail.save()
+        mock_fetch.return_value = {'A11Df9S': make_departure_row(designation='2026 LX')}
 
-        with mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token') as mock_session:
-            result = self.command._fallback_lookup_designations({})
+        self.command._update_designations(dry_run=False)
 
-        self.assertEqual(result, {})
-        mock_session.assert_not_called()
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, 'A11Df9S')
+        self.scout_detail.refresh_from_db()
+        self.assertEqual(self.scout_detail.mpc_status, 'lost')
 
-    def test_target_already_covered_by_bulk_map_is_not_looked_up(self):
-        scout_detail = ScoutDetailFactory(active=False)
-        scout_detail.target.name = 'A11Df9S'
-        scout_detail.target.save()
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_active_candidate_can_be_designated(self, mock_fetch):
+        # The MPC can designate an object while Scout still lists it; the rename and
+        # settlement happen immediately, and reconciliation keeps matching the roster row
+        # through the trksub alias until Scout drops it.
+        self.scout_detail.active = True
+        self.scout_detail.save()
+        mock_fetch.return_value = {'A11Df9S': make_departure_row(designation='2026 LX')}
 
-        with mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token') as mock_session:
-            result = self.command._fallback_lookup_designations({'A11Df9S': '2026 LX'})
+        self.command._update_designations(dry_run=False)
 
-        self.assertEqual(result, {})
-        mock_session.assert_not_called()
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, '2026 LX')
+        self.scout_detail.refresh_from_db()
+        self.assertEqual(self.scout_detail.mpc_status, 'designated')
+        self.assertTrue(self.scout_detail.active)
 
-    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designation_for')
-    @mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token')
-    def test_stuck_target_is_looked_up_individually(self, mock_session, mock_lookup):
-        scout_detail = ScoutDetailFactory(active=False)
-        scout_detail.target.name = 'A11Df9S'
-        scout_detail.target.save()
-        mock_session.return_value = ('fake-session', 'fake-token')
-        mock_lookup.return_value = make_designation_row('2026 LX')
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_departed_candidate_missing_from_the_page_is_stamped(self, mock_fetch):
+        # The page has outcomes, just not for this object yet: stamp the attempt so the
+        # pending state is visible, and leave it unsettled for later runs.
+        mock_fetch.return_value = {'ZZ99999': make_departure_row(status='lost')}
 
-        result = self.command._fallback_lookup_designations({})
+        self.command._update_designations(dry_run=False)
 
-        mock_lookup.assert_called_once_with('fake-session', 'fake-token', 'A11Df9S')
-        self.assertEqual(result, {'A11Df9S': make_designation_row('2026 LX')})
+        self.scout_detail.refresh_from_db()
+        self.assertIsNone(self.scout_detail.mpc_status)
+        self.assertIsNotNone(self.scout_detail.mpc_status_checked)
 
-    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designation_for')
-    @mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token')
-    def test_unresolved_individual_lookup_is_omitted(self, mock_session, mock_lookup):
-        scout_detail = ScoutDetailFactory(active=False)
-        scout_detail.target.name = 'A11Df9S'
-        scout_detail.target.save()
-        mock_session.return_value = ('fake-session', 'fake-token')
-        mock_lookup.return_value = None
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_fetch_failure_warns_without_raising(self, mock_fetch):
+        mock_fetch.side_effect = requests.ConnectionError('blocked')
 
-        result = self.command._fallback_lookup_designations({})
+        self.command._update_designations(dry_run=False)
 
-        self.assertEqual(result, {})
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, 'A11Df9S')
+        self.scout_detail.refresh_from_db()
+        self.assertIsNone(self.scout_detail.mpc_status_checked)
 
-    @mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token')
-    def test_session_failure_does_not_raise(self, mock_session):
-        ScoutDetailFactory(active=False)
-        mock_session.side_effect = requests.ConnectionError('boom')
-
-        result = self.command._fallback_lookup_designations({})
-
-        self.assertEqual(result, {})
-
-    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designation_for')
-    @mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token')
-    def test_one_failed_lookup_does_not_stop_the_rest(self, mock_session, mock_lookup):
-        first = ScoutDetailFactory(active=False)
-        first.target.name = 'A11Df9S'
-        first.target.save()
-        second = ScoutDetailFactory(active=False)
-        second.target.name = 'ZZ99999'
-        second.target.save()
-        mock_session.return_value = ('fake-session', 'fake-token')
-
-        def side_effect(session, token, trksub):
-            if trksub == 'A11Df9S':
-                raise requests.HTTPError('boom')
-            return make_designation_row('2026 MY')
-
-        mock_lookup.side_effect = side_effect
-
-        result = self.command._fallback_lookup_designations({}, delay=0)
-
-        self.assertEqual(result, {'ZZ99999': make_designation_row('2026 MY')})
-
-    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designation_for')
-    @mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token')
-    def test_lookups_are_capped_per_run(self, mock_session, mock_lookup):
-        for i in range(5):
-            detail = ScoutDetailFactory(active=False)
-            detail.target.name = f'Trk{i:04d}'
-            detail.target.save()
-        mock_session.return_value = ('fake-session', 'fake-token')
-        mock_lookup.return_value = None
-
-        out = StringIO()
-        self.command.stdout = out
-        self.command._fallback_lookup_designations({}, max_lookups=2, delay=0)
-
-        self.assertEqual(mock_lookup.call_count, 2)
-        self.assertIn('only attempting 2', out.getvalue())
-
-    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_prev_designation_for')
-    @mock.patch('tom_jpl.management.commands.updatescout._mpc_session_and_csrf_token')
-    def test_delay_is_applied_between_lookups_but_not_before_the_first(self, mock_session, mock_lookup):
-        first = ScoutDetailFactory(active=False)
-        first.target.name = 'A11Df9S'
-        first.target.save()
-        second = ScoutDetailFactory(active=False)
-        second.target.name = 'ZZ99999'
-        second.target.save()
-        mock_session.return_value = ('fake-session', 'fake-token')
-        mock_lookup.return_value = None
-
-        with mock.patch('tom_jpl.management.commands.updatescout.time.sleep') as mock_sleep:
-            self.command._fallback_lookup_designations({}, delay=1.0)
-
-        mock_sleep.assert_called_once_with(1.0)
-
-
-class TestMpcSessionAndCsrfToken(SimpleTestCase):
-    """Tests for _mpc_session_and_csrf_token()."""
-
-    @mock.patch('tom_jpl.management.commands.updatescout.requests.Session')
-    def test_extracts_csrf_token(self, mock_session_cls):
-        mock_session = mock.Mock()
-        mock_response = mock.Mock()
-        mock_response.text = '<input type="hidden" name="csrfmiddlewaretoken" value="abc123">'
-        mock_session.get.return_value = mock_response
-        mock_session_cls.return_value = mock_session
-
-        session, token = _mpc_session_and_csrf_token()
-
-        self.assertIs(session, mock_session)
-        self.assertEqual(token, 'abc123')
-
-    @mock.patch('tom_jpl.management.commands.updatescout.requests.Session')
-    def test_raises_when_token_not_found(self, mock_session_cls):
-        mock_session = mock.Mock()
-        mock_response = mock.Mock()
-        mock_response.text = '<html>no token here</html>'
-        mock_session.get.return_value = mock_response
-        mock_session_cls.return_value = mock_session
-
-        with self.assertRaises(ValueError):
-            _mpc_session_and_csrf_token()
-
-
-class TestFetchMpcPrevDesignationFor(SimpleTestCase):
-    """Tests for _fetch_mpc_prev_designation_for(), the single-object AJAX lookup fallback."""
-
-    def test_returns_designation_when_found(self):
-        session = mock.Mock()
-        response = mock.Mock()
-        response.json.return_value = {
-            'neocp_prev_des': (
-                '<table><tr><td>A11Df9S</td><td>2026 LX</td><td>None</td>'
-                '<td>None</td><td>2026-06-15T00:00:00</td></tr></table>'
-            )
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_retired_duplicate_we_never_held_becomes_an_alias_of_the_survivor(self, mock_fetch):
+        # C33Qq7Q was identified with A11Df9S and retired; we only ever ingested A11Df9S.
+        # After A11Df9S is renamed to the designation, the retired trksub is recorded as
+        # one of its aliases so both identifiers stay searchable.
+        mock_fetch.return_value = {
+            'A11Df9S': make_departure_row(designation='2026 LX'),
+            'C33Qq7Q': make_departure_row(designation='2026 LX', merged_into='A11Df9S'),
         }
-        session.post.return_value = response
 
-        result = _fetch_mpc_prev_designation_for(session, 'tok', 'A11Df9S')
+        self.command._update_designations(dry_run=False)
 
-        self.assertEqual(result, make_designation_row('2026 LX', datetime_ut='2026-06-15T00:00:00'))
-
-    def test_returns_none_on_error_message(self):
-        session = mock.Mock()
-        response = mock.Mock()
-        response.json.return_value = {'error_message': 'Not found'}
-        session.post.return_value = response
-
-        result = _fetch_mpc_prev_designation_for(session, 'tok', 'UNKNOWN1')
-
-        self.assertIsNone(result)
-
-    def test_returns_the_row_without_a_designation_when_not_resolved(self):
-        session = mock.Mock()
-        response = mock.Mock()
-        response.json.return_value = {
-            'neocp_prev_des': (
-                '<table><tr><td>ZZ99999</td><td>None</td><td>lost</td>'
-                '<td>None</td><td>2026-06-15T00:00:00</td></tr></table>'
-            )
-        }
-        session.post.return_value = response
-
-        # A lost object still has provenance worth returning -- why it left, and when. It is
-        # the caller's job to notice there is no designation to rename to.
-        result = _fetch_mpc_prev_designation_for(session, 'tok', 'ZZ99999')
-
-        self.assertEqual(result, make_designation_row(status='lost', datetime_ut='2026-06-15T00:00:00'))
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, '2026 LX')
+        self.assertTrue(TargetName.objects.filter(name='C33Qq7Q', target=self.target).exists())
 
 
-class TestFetchMpcPrevDesignations(SimpleTestCase):
-    """``_fetch_mpc_prev_designations`` parses the MPC 'Previous NEOCP Objects' HTML table.
+class TestParseDepartures(SimpleTestCase):
+    """``_parse_departures`` turns the MPC 'Previous NEOCP Objects' listing into normalized
+    outcome records.
 
-    The live MPC page is mocked at the ``requests.get`` boundary so this exercises the
-    real HTML-table parsing and row-filtering logic (header rows, dash/None placeholders,
-    short rows, empty cells) without a network call. Every row with a recognised status is
-    returned whole -- designation, status, reference and timestamp -- not just the ones
-    that were designated.
+    The fixture mirrors the real page: one ``<li>`` per departure, designations as
+    ``DESIG = TRKSUB (date) [see MPEC ...]`` with the reference inside anchor/italic
+    markup, comets carrying a ``Comet`` prefix, identifications as ``TRKSUB = TRKSUB``,
+    and phrase-style outcomes ('was not confirmed', 'does not exist', 'was not a minor
+    planet'). Navigation chrome and unknown line shapes must be ignored, and
+    identification chains followed to the surviving object's own outcome.
     """
 
-    # Mirrors the real 5-column NEOCP page (trksub, iau_desig, status, reference, datetime_ut)
-    # with representative rows: asteroid designations, a comet (C/...), and lost/dne objects
-    # whose iau_desig renders as the literal "None". A <th> header (ignored — the parser only
-    # collects <td>) and synthetic edge cases (a <td> header-like row, dash placeholders, a
-    # single-cell row, an empty-trksub row) exercise the remaining filter branches.
     SAMPLE_HTML = """
-    <table>
-      <tr><th>trksub</th><th>iau_desig</th><th>status</th><th>reference</th><th>datetime_ut</th></tr>
-      <tr><td>trksub</td><td>iau_desig</td><td>status</td><td>reference</td><td>datetime_ut</td></tr>
-      <tr><td>ST26F43</td><td>2026 LW2</td><td>None</td><td>MPEC 2026-L105</td><td>2026-06-15T21:36:25</td></tr>
-      <tr><td>P12nn8G</td><td>C/2026 L2</td><td>None</td><td>MPEC 2026-L104</td><td>2026-06-15T20:58:27</td></tr>
-      <tr><td>A11DnRU</td><td>2026 LS1</td><td>None</td><td>None</td><td>2026-06-15T15:32:57</td></tr>
-      <tr><td>ML81524</td><td>None</td><td>lost</td><td>None</td><td>2026-06-15T11:00:26</td></tr>
-      <tr><td>ST26F44</td><td>None</td><td>dne</td><td>None</td><td>2026-06-15T08:44:05</td></tr>
-      <tr><td>A33Zz9Q</td><td>&mdash;</td><td>None</td></tr>
-      <tr><td>A44Yy8P</td><td>-</td><td>None</td></tr>
-      <tr><td>OnlyOneCell</td></tr>
-      <tr><td></td><td>2026 ZZ</td></tr>
-    </table>
+    <html><body>
+    <ul><li><a href="/mpec/RecentMPECs.html">Recent</a></li></ul>
+    <ul>
+    <li> 2026 QT = ST26H67 (Aug. 21.34 UT)   [see <a href="/mpec/K26/K26Q53.html"><i>MPEC</i> 2026-Q53</a>]
+    <li> Comet P/2026 P1 = P12p4Jx (Aug. 25.75 UT)   [see <a href="/mpec/K26/K26Q98.html"><i>MPEC</i> 2026-Q98</a>]
+    <li> (452639) = A11EXtc (July 28.51 UT)   [see <a href="/mpec/K26/K26O50.html"><i>MPEC</i> 2026-O50</a>]
+    <li>ST26H89 = TF26HD1 (Aug. 24.69 UT)
+    <li> 2026 QA3 = ST26H89 (Aug. 23.11 UT)   [see <a href="/mpec/K26/K26QA5.html"><i>MPEC</i> 2026-Q105</a>]
+    <li> ST26H76 was not confirmed (Aug. 27.68 UT)
+    <li> 19E0001 does not exist (June 20.19 UT)
+    <li> 6EI3621 was not a minor planet (May 19.65 UT)
+    <li>B11AAA2 = B11AAA1 (Aug. 20.00 UT)
+    <li> B11AAA2 was not confirmed (Aug. 19.00 UT)
+    <li>C11AAA1 = C11AAA2 (Aug. 20.00 UT)
+    </ul>
+    </body></html>
     """
 
-    def _mock_response(self, text):
-        response = mock.Mock()
-        response.text = text
-        return response
+    def test_designation_line_with_reference(self):
+        outcomes = _parse_departures(self.SAMPLE_HTML)
+        self.assertEqual(outcomes['ST26H67'], make_departure_row(
+            designation='2026 QT', reference='MPEC 2026-Q53'))
+
+    def test_comet_prefix_is_stripped_from_the_designation(self):
+        outcomes = _parse_departures(self.SAMPLE_HTML)
+        self.assertEqual(outcomes['P12p4Jx']['designation'], 'P/2026 P1')
+
+    def test_numbered_designation_keeps_mpc_rendering(self):
+        outcomes = _parse_departures(self.SAMPLE_HTML)
+        self.assertEqual(outcomes['A11EXtc']['designation'], '(452639)')
+
+    def test_outcome_phrases_map_to_status_codes(self):
+        outcomes = _parse_departures(self.SAMPLE_HTML)
+        self.assertEqual(outcomes['ST26H76'], make_departure_row(status='lost'))
+        self.assertEqual(outcomes['19E0001'], make_departure_row(status='dne'))
+        self.assertEqual(outcomes['6EI3621'], make_departure_row(status='na'))
+
+    def test_identification_chain_inherits_the_survivors_designation(self):
+        # TF26HD1 was retired into ST26H89 ('ST26H89 = TF26HD1'), and ST26H89 was then
+        # designated ('2026 QA3 = ST26H89'): the chain resolves TF26HD1 to the final
+        # designation, keeping the immediate survivor in merged_into.
+        outcomes = _parse_departures(self.SAMPLE_HTML)
+        self.assertEqual(outcomes['TF26HD1'], make_departure_row(
+            designation='2026 QA3', reference='MPEC 2026-Q105', merged_into='ST26H89'))
+        # The survivor's own record is a plain designation, with no merge involved.
+        self.assertEqual(outcomes['ST26H89'], make_departure_row(
+            designation='2026 QA3', reference='MPEC 2026-Q105'))
+
+    def test_identification_chain_inherits_a_failed_survivors_reason(self):
+        # B11AAA1 was retired into B11AAA2 ('B11AAA2 = B11AAA1'), and B11AAA2 itself was
+        # then never confirmed: the retired submission shares that fate.
+        outcomes = _parse_departures(self.SAMPLE_HTML)
+        self.assertEqual(outcomes['B11AAA1'], make_departure_row(
+            status='lost', merged_into='B11AAA2'))
+
+    def test_unresolvable_chain_yields_no_record(self):
+        # C11AAA2 was retired into C11AAA1, which the page knows nothing about
+        # (presumably still alive on the NEOCP): stay pending rather than guess.
+        outcomes = _parse_departures(self.SAMPLE_HTML)
+        self.assertNotIn('C11AAA2', outcomes)
+
+    def test_navigation_chrome_is_ignored(self):
+        outcomes = _parse_departures(self.SAMPLE_HTML)
+        self.assertNotIn('Recent', outcomes)
+
+    def test_empty_page_returns_empty_mapping(self):
+        self.assertEqual(_parse_departures('<html><body></body></html>'), {})
 
     @mock.patch('tom_jpl.management.commands.updatescout.requests.get')
-    def test_parses_designations_with_their_status_and_reference(self, mock_get):
-        mock_get.return_value = self._mock_response(self.SAMPLE_HTML)
-
-        mapping = _fetch_mpc_prev_designations()
-
-        # Asteroid AND comet designations are kept, each carrying the rest of its row.
-        self.assertEqual(
-            mapping['ST26F43'],
-            make_designation_row('2026 LW2', reference='MPEC 2026-L105', datetime_ut='2026-06-15T21:36:25'),
-        )
-        # A comet designation is treated like any other.
-        self.assertEqual(mapping['P12nn8G']['iau_desig'], 'C/2026 L2')
-        # A designation can be assigned before its MPEC is published, so a missing reference
-        # must not cost the row its designation.
-        self.assertEqual(mapping['A11DnRU']['iau_desig'], '2026 LS1')
-        self.assertIsNone(mapping['A11DnRU']['reference'])
-
-    @mock.patch('tom_jpl.management.commands.updatescout.requests.get')
-    def test_undesignated_objects_are_kept_with_their_reason(self, mock_get):
-        # Objects that left without a designation are the point of returning whole rows: the
-        # status records *why*, which is only on the page while the row is inside its rolling
-        # ~100-entry window. Callers that only want renames skip these on iau_desig being None.
-        mock_get.return_value = self._mock_response(self.SAMPLE_HTML)
-
-        mapping = _fetch_mpc_prev_designations()
-
-        self.assertEqual(mapping['ML81524']['status'], 'lost')
-        self.assertIsNone(mapping['ML81524']['iau_desig'])
-        self.assertEqual(mapping['ST26F44']['status'], 'dne')
-        self.assertIsNone(mapping['ST26F44']['iau_desig'])
-
-    @mock.patch('tom_jpl.management.commands.updatescout.requests.get')
-    def test_placeholder_and_malformed_rows_are_excluded(self, mock_get):
-        mock_get.return_value = self._mock_response(self.SAMPLE_HTML)
-
-        mapping = _fetch_mpc_prev_designations()
-
-        # Header rows (status cell holds the literal 'status'), single-cell rows and
-        # empty-trksub rows never make it in.
-        self.assertNotIn('trksub', mapping)
-        self.assertNotIn('OnlyOneCell', mapping)
-        self.assertNotIn('', mapping)
-        # Dash placeholders in iau_desig become None rather than a literal '-'.
-        self.assertIsNone(mapping['A33Zz9Q']['iau_desig'])
-        self.assertIsNone(mapping['A44Yy8P']['iau_desig'])
-
-    @mock.patch('tom_jpl.management.commands.updatescout.requests.get')
-    def test_unrecognized_status_is_excluded_by_default(self, mock_get):
-        # An object with a status this code has never seen before, but with what looks like a
-        # real designation in iau_desig. Whitelisting the "clean" status value means this is
-        # excluded rather than silently let through -- unlike a blacklist of known-bad statuses,
-        # which would have no way to know this new one is bad.
-        html = """
-        <table>
-          <tr><td>Z99Xy1A</td><td>2026 ZZ9</td><td>impacted</td><td>None</td><td>2026-08-14T00:00:00</td></tr>
-        </table>
-        """
-        mock_get.return_value = self._mock_response(html)
-
-        mapping = _fetch_mpc_prev_designations()
-
-        self.assertEqual(mapping, {})
-
-    @mock.patch('tom_jpl.management.commands.updatescout.requests.get')
-    def test_empty_table_returns_empty_mapping(self, mock_get):
-        mock_get.return_value = self._mock_response('<table></table>')
-
-        self.assertEqual(_fetch_mpc_prev_designations(), {})
-
-    @mock.patch('tom_jpl.management.commands.updatescout.requests.get')
-    def test_http_error_propagates(self, mock_get):
+    def test_fetch_http_error_propagates(self, mock_get):
         response = mock.Mock()
         response.raise_for_status.side_effect = requests.HTTPError('500')
         mock_get.return_value = response
 
         with self.assertRaises(requests.HTTPError):
-            _fetch_mpc_prev_designations()
+            _fetch_mpc_departures()

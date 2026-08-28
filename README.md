@@ -63,4 +63,14 @@ Normal use consists of:
    python manage.py updatescout
    ```
 
+   The two `updatescout` phases have different natural cadences: reconciliation tracks the
+   Scout roster, which changes hourly, while the MPC's Previous-NEOCP outcome page holds
+   months of departures, so a daily check is plenty (and is kinder to the MPC's servers).
+   From `cron`, run them as two entries:
+
+   ```
+   17 * * * *  python manage.py updatescout --skip-designations
+   47 4 * * *  python manage.py updatescout --skip-reconcile
+   ```
+
    Note: `rundataquery` catches its own failures and logs them rather than raising, so a failed run exits 0 and prints 'Finished querying targets' only on success. This should be borne in mind if running from e.g. a `cron` job, in that silent failures won't trip a non-zero exit check.
