@@ -1,0 +1,49 @@
+{% load tom_common_extras %}
+{% load scoutdetail_extras %}
+<div class="card">
+    <div class="card-header">
+        <div style="display: flex; justify-content: space-between">
+            <h4 class="card-title">Scout History</h4>
+        </div>
+    </div>
+  <div class="card-body">
+    {% if history_rows %}
+      <p class="text-muted">
+        One row per Scout orbit recomputation, newest first. Highlighted values changed from the
+        previous run; hover over them to see the previous value.
+      </p>
+      <div class="table-responsive">
+        <table class="table table-sm table-hover">
+          <thead>
+            <tr>
+              <th>Last run</th>
+              {% for field, label in history_fields %}
+                <th>{{ label|capfirst }}</th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in history_rows %}
+              <tr>
+                <td>{{ row.last_run|date:"Y-m-d H:i" }}</td>
+                {% for field, label in history_fields %}
+                  {% with change=row.changes|get_change:field %}
+                    {% if change %}
+                      <td class="table-warning" title="was {{ change.0|format_value:field|default_if_none:'—'|truncate_value_for_display }}">
+                        <strong>{{ row|field_display:field|default_if_none:''|truncate_value_for_display }}</strong>
+                      </td>
+                    {% else %}
+                      <td>{{ row|field_display:field|default_if_none:''|truncate_value_for_display }}</td>
+                    {% endif %}
+                  {% endwith %}
+                {% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      No Scout history available.
+    {% endif %}
+  </div>
+</div>

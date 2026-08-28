@@ -1,17 +1,20 @@
+from datetime import timezone
 from math import sqrt, degrees
 from dateutil.parser import parse
-from dateutil.tz import tzutc
 import logging
 import requests
 
+from astropy import units as u
 from astropy.constants import GM_sun, au
+from astropy.coordinates import Angle
 from django.contrib import messages
+from django.utils.timezone import make_aware
 
 from tom_dataservices.dataservices import DataService
 from tom_targets.models import Target
 from tom_jpl import __version__
 from tom_jpl.forms import ScoutForm
-from tom_jpl.models import ScoutDetail
+from tom_jpl.models import ScoutDetail, ScoutDetailHistory
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +24,6 @@ class ScoutDataService(DataService):
     Docstring for ScoutDataService
     """
     name = 'Scout'
-    app_version = '0.0.4'
     info_url = 'https://cneos.jpl.nasa.gov/scout/intro.html'
     query_results_table = 'tom_jpl/partials/scout_query_results_table.html'
     expected_signature = {'source': 'NASA/JPL Scout API', 'version': '1.3'}
@@ -31,6 +33,14 @@ class ScoutDataService(DataService):
 
     # Gaussian gravitational constant
     _k = degrees(sqrt(GM_sun.value) * au.value**-1.5 * 86400.0)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Set by build_query_parameters() whenever it's given form-shaped parameters (i.e. it
+        # has a 'neo_score_min' key); a DataServiceQuery whose parameters were saved/edited
+        # without going through the form -- e.g. hand-edited in the admin -- lacks that key, so
+        # this default must exist independently rather than only ever being set conditionally.
+        self.input_parameters = {}
 
     @classmethod
     def urls(cls, **kwargs) -> dict:
@@ -71,6 +81,20 @@ class ScoutDataService(DataService):
             data['n-orbits'] = 1
         self.query_parameters = data
         return data
+
+    def build_query_parameters_from_target(self, target, **kwargs):
+        """
+        Build query parameters to re-query Scout for a single existing target, keyed by its
+        tracking designation (``Target.name``).
+
+        This is what lets a target be re-queried directly (e.g. from the "Manage data" tab, or
+        by a management command reconciling already-ingested candidates) rather than requiring
+        the whole Scout list to be re-fetched and re-filtered.
+
+        :param target: A target object to be queried
+        :return: query_parameters (as understood by :meth:`build_query_parameters`)
+        """
+        return {'tdes': target.name}
 
     def query_service(self, data, **kwargs):
         """Make call to the JPL Scout service
@@ -126,8 +150,8 @@ class ScoutDataService(DataService):
             'neo_score_min': neo_score_min,
             'pha_score_min': pha_score_min,
             'geo_score_max': geo_score_max,
-            'impact_rating_min': p['impact_rating_min'],  # May be None intentionally
-            'ca_dist_min': p['ca_dist_min'],
+            'impact_rating_min': p.get('impact_rating_min'),  # May be None/absent intentionally
+            'ca_dist_min': p.get('ca_dist_min'),
             'pos_unc_min': pos_unc_min,
             'pos_unc_max': pos_unc_max,
         }
@@ -268,11 +292,54 @@ class ScoutDataService(DataService):
             target.mean_anomaly = mean_anomaly
         return target
 
+    @staticmethod
+    def _parse_ra_to_degrees(ra_str):
+        """Convert a Scout sexagesimal RA string (e.g. '08:54', as HH:MM[:SS]) to decimal degrees."""
+        if ra_str is None:
+            return None
+        try:
+            return Angle(ra_str, unit=u.hourangle).degree
+        except ValueError:
+            # Also catches astropy's IllegalHourError/IllegalMinuteError/IllegalSecondError
+            # (all ValueError subclasses), so an out-of-range value like '25:00' is rejected
+            # rather than silently producing an RA past 360 degrees.
+            return None
+
+    @staticmethod
+    def _safe_float(value):
+        """Convert value to float, returning None for missing or malformed input rather than raising --
+        matches the defensive (ValueError, TypeError) handling _parse_result_values already applies to
+        'unc'/'caDist', extended to every other numeric field Scout reports as a string.
+        """
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _parse_utc_datetime(value):
+        """Parse a Scout timestamp string into an aware UTC datetime.
+
+        Scout's timestamps are documented as UTC with no offset in the string, so
+        dateutil.parser.parse() returns a naive datetime; make_aware() attaches UTC to
+        it. Unlike a plain `.replace(tzinfo=...)`, make_aware() raises ValueError rather
+        than silently mislabeling the value if Scout ever starts sending an
+        already-offset-aware string instead -- a loud failure beats a silently wrong
+        timestamp.
+        """
+        if value is None:
+            return None
+        return make_aware(parse(value), timezone.utc)
+
     def _parse_detail_data(self, query_results, **kwargs):
         """Parse and coerce relevant fields from a per-object query result to create a dictionary of reduced datums.
         (These aren't really "reduced datums" in the sense of being derived from the raw data, but a
         temporary hacky workaround as these are the only things supported post-Target saving)
         """
+
+        arc_hours = self._safe_float(query_results.get('arc'))
 
         scout_detail = {
             'num_obs': query_results.get('nObs'),
@@ -282,15 +349,46 @@ class ScoutDataService(DataService):
             'ieo_score': query_results.get('ieoScore'),
             'geocentric_score': query_results.get('geocentricScore'),
             'impact_rating': query_results.get('rating'),
-            'ca_dist': float(query_results.get('caDist')) if query_results.get('caDist') is not None else None,
-            'arc': float(query_results.get('arc')) if query_results.get('arc') is not None else None,
-            'rms': float(query_results.get('rmsN')) if query_results.get('rmsN') is not None else None,
-            'uncertainty': float(query_results.get('unc')) if query_results.get('unc') is not None else None,
-            'uncertainty_p1': float(query_results.get('uncP1')) if query_results.get('uncP1') is not None else None,
-            'last_run': parse(query_results.get('lastRun')).replace(tzinfo=tzutc()) if query_results.get('lastRun')
-            else None
+            'ca_dist': self._safe_float(query_results.get('caDist')),
+            # Scout reports 'arc' in hours; we store it in days for consistency with confirmed-object arcs.
+            'arc': arc_hours / 24.0 if arc_hours is not None else None,
+            'rms': self._safe_float(query_results.get('rmsN')),
+            'uncertainty': self._safe_float(query_results.get('unc')),
+            'uncertainty_p1': self._safe_float(query_results.get('uncP1')),
+            'vmag': self._safe_float(query_results.get('Vmag')),
+            'rate': self._safe_float(query_results.get('rate')),
+            'ra': self._parse_ra_to_degrees(query_results.get('ra')),
+            'dec': self._safe_float(query_results.get('dec')),
+            't_ephem': self._parse_utc_datetime(query_results.get('tEphem')),
+            'last_run': self._parse_utc_datetime(query_results.get('lastRun'))
         }
         return scout_detail
+
+    def store_scout_detail(self, target, detail_data):
+        """Write one Scout snapshot to a target's ScoutDetail and append it to its history.
+
+        Takes the parsed dict :meth:`_parse_detail_data` produces. That parse reads only fields
+        the summary listing already carries, so a row from an unfiltered list query stores
+        identically to a per-object response -- which is what lets reconciliation refresh from
+        the roster without a request per candidate.
+        """
+        # A target seen here for the first time is, by definition, active. But on an
+        # existing ScoutDetail row, `active` is deliberately left out of `defaults` so it's
+        # untouched: the updatescout command's reconciliation is the sole authority on
+        # whether an already-known candidate has left Scout, and a stale target_result (e.g.
+        # a cached interactive query result submitted well after the query ran) must not be
+        # able to silently resurrect one that reconciliation already marked inactive.
+        ScoutDetail.objects.update_or_create(target=target,
+                                             defaults=detail_data,
+                                             create_defaults={**detail_data, 'active': True},
+                                             )
+        if detail_data.get('last_run') is not None:
+            history_defaults = {k: v for k, v in detail_data.items() if k != 'last_run'}
+            ScoutDetailHistory.objects.get_or_create(
+                target=target,
+                last_run=detail_data['last_run'],
+                defaults=history_defaults,
+            )
 
     def to_target(self, target_result=None, **kwargs):
         """
@@ -328,8 +426,5 @@ class ScoutDataService(DataService):
                 messages.success(request, f"Orbital elements for {target.name} have been updated.")
         # Finally we update or create the scout detail data
         if target and target_result and 'scout_detail' in target_result:
-            ScoutDetail.objects.update_or_create(target=target,
-                                                 defaults=target_result['scout_detail'],
-                                                 create_defaults=target_result['scout_detail'],
-                                                 )
+            self.store_scout_detail(target, target_result['scout_detail'])
         return target
