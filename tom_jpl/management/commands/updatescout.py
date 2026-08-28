@@ -46,7 +46,7 @@ from tom_dataservices.dataservices import get_data_service_class
 
 from tom_jpl.models import ScoutDetail
 
-_MPC_PREV_DES_URL = 'https://minorplanetcenter.net/iau/NEO/ToConfirm_PrevDes.html'
+_MPC_PREV_DES_URL = 'https://data.minorplanetcenter.net/iau/NEO/ToConfirm_PrevDes.html'
 
 # One departure per line of page text, in one of two shapes. Designation/identification:
 #   2026 QT = ST26H67 (Aug. 21.34 UT)   [see MPEC 2026-Q53]
