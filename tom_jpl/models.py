@@ -8,20 +8,22 @@ from tom_targets.models import BaseTarget
 # by definition and would drown out the interesting orbit-quality changes.
 HISTORY_UNTRACKED_FIELDS = {'id', 'target', 'last_run', 'ra', 'dec', 'vmag', 'rate', 't_ephem'}
 
-# Known outcomes of an object leaving the NEOCP, per the "Previous NEOCP Objects" page's
-# 'status' column. 'designated' is the happy path -- the page renders it as an empty cell (or
-# the literal text 'None'), which the parser translates to this value so the stored vocabulary
-# is ours rather than the page's rendering (a stored 'None' string is indistinguishable from
-# SQL NULL in templates, the admin, and DB dumps). The rest are MPC's own codes for leaving
-# without a designation, kept verbatim. The 'na'/'ns' distinction is MPC's published
-# artificial-satellite policy: a tracklet whose motion matches the two-line element set of a
-# known artificial object is removed as 'na', while one that can't be matched but has a
-# geocentric score > 10 is only flagged 'ns'.
+# Tracked fields shown as columns in the Scout History table, in display order.
+HISTORY_DISPLAY_FIELDS = ['num_obs', 'neo_score', 'neo1km_score', 'pha_score', 'ieo_score',
+                          'geocentric_score', 'impact_rating', 'ca_dist', 'arc', 'rms',
+                          'uncertainty', 'uncertainty_p1']
+
+# Known outcomes of an object leaving the NEOCP, as parsed from the MPC's "Previous NEOCP
+# Objects" page. 'designated' is the happy path (a 'DESIG = trksub' line on the page); the
+# rest are the page's phrasings for leaving without a designation, under MPC's own codes.
+# The 'na'/'ns' distinction is MPC's published artificial-satellite policy: a tracklet whose
+# motion matches the two-line element set of a known artificial object is removed as 'na',
+# while one that can't be matched but has a geocentric score > 10 is only flagged 'ns'.
 #
-# Note the column is also sometimes another tracklet's trksub, meaning the two were identified
-# with each other. Those rows aren't kept -- validating against this whitelist rather than
-# blacklisting known-bad values means anything unrecognised (a new MPC status, or one of those
-# trksubs) is skipped by default instead of silently misread as something it isn't.
+# An object retired because the MPC identified it with another submission of the same body
+# gets no code of its own: the departure parser follows the identification chain to the
+# surviving object and records *its* outcome here, keeping the pairing in
+# ScoutDetail.merged_into.
 MPC_STATUSES = (
     ('designated', 'received an IAU designation'),
     ('lost', 'was not confirmed'),
@@ -154,3 +156,18 @@ class ScoutDetailHistory(BaseScoutDetail):
         old = previous.as_dict()
         return {field: (old[field], value) for field, value in self.as_dict().items()
                 if field not in HISTORY_UNTRACKED_FIELDS and value != old[field]}
+
+    @classmethod
+    def annotated_history(cls, target):
+        """Return the target's history rows newest first, each annotated with a `changes` dict.
+
+        `changes` holds the row-to-row differences (see :meth:`changes_from`) relative to the
+        chronologically previous Scout run.
+        """
+        rows = list(cls.objects.filter(target=target).order_by('last_run'))
+        previous = None
+        for row in rows:
+            row.changes = row.changes_from(previous)
+            previous = row
+        rows.reverse()
+        return rows

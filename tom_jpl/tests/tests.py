@@ -13,6 +13,7 @@ from unittest import mock
 from tom_jpl.jpl import ScoutDataService, ScoutDetail
 from tom_jpl.management.commands.updatescout import Command, _fetch_mpc_departures, _parse_departures
 from tom_jpl.models import ScoutDetailHistory
+from tom_jpl.templatetags.scoutdetail_extras import history_tab_context, tab_context
 from tom_jpl.tests.factories import NonSiderealTargetFactory, ScoutDetailFactory, ScoutDetailHistoryFactory
 from tom_targets.models import Target, TargetName
 
@@ -781,7 +782,7 @@ class ScoutDetailsPartialTest(TestCase):
     def _render_partial(self, scoutdetail):
         return render_to_string(
             'tom_jpl/partials/scoutdetails_partial.html',
-            {'scoutdetail': scoutdetail}
+            tab_context({'target': scoutdetail.target})
         )
 
     def test_excludes_none_values(self):
@@ -801,6 +802,58 @@ class ScoutDetailsPartialTest(TestCase):
         self.assertIn('NEO', rendered)
         self.assertIn('78', rendered)
 
+    def test_lifecycle_fields_are_not_listed_as_raw_rows(self):
+        # The lifecycle fields render as the Outcome section, not as generic dict rows.
+        scoutdetail = ScoutDetailFactory(
+            active=False, mpc_status='designated', mpc_reference='MPEC 2026-L12',
+            mpc_status_checked=datetime(2026, 8, 28, tzinfo=tzutc()))
+        rendered = self._render_partial(scoutdetail)
+        self.assertNotIn('mpc status', rendered)
+        self.assertNotIn('merged into', rendered)
+        self.assertNotIn('active', rendered)
+
+    def test_active_candidate_shows_on_scout_badge(self):
+        scoutdetail = ScoutDetailFactory(active=True)
+        rendered = self._render_partial(scoutdetail)
+        self.assertIn('On Scout', rendered)
+        self.assertNotIn('Left Scout', rendered)
+
+    def test_designated_outcome_shows_status_and_reference(self):
+        scoutdetail = ScoutDetailFactory(active=False, mpc_status='designated',
+                                         mpc_reference='MPEC 2026-L12')
+        rendered = self._render_partial(scoutdetail)
+        self.assertIn('Left Scout', rendered)
+        self.assertIn('Received an IAU designation', rendered)
+        self.assertIn('(MPEC 2026-L12)', rendered)
+
+    def test_lost_outcome_shows_reason(self):
+        scoutdetail = ScoutDetailFactory(active=False, mpc_status='lost')
+        rendered = self._render_partial(scoutdetail)
+        self.assertIn('Was not confirmed', rendered)
+
+    def test_merged_into_links_to_the_surviving_target(self):
+        survivor = Target.objects.create(name='2026 LX', type=Target.NON_SIDEREAL)
+        scoutdetail = ScoutDetailFactory(active=False, mpc_status='designated',
+                                         merged_into='2026 LX')
+        rendered = self._render_partial(scoutdetail)
+        self.assertIn(f'/targets/{survivor.id}/', rendered)
+        self.assertIn('2026 LX</a>', rendered)
+
+    def test_unresolvable_merged_into_falls_back_to_plain_text(self):
+        scoutdetail = ScoutDetailFactory(active=False, mpc_status='designated',
+                                         merged_into='2026 ZZ9')
+        rendered = self._render_partial(scoutdetail)
+        self.assertIn('2026 ZZ9', rendered)
+        self.assertNotIn('2026 ZZ9</a>', rendered)
+
+    def test_departed_but_unsettled_candidate_shows_pending_outcome(self):
+        scoutdetail = ScoutDetailFactory(
+            active=False, mpc_status=None,
+            mpc_status_checked=datetime(2026, 8, 28, 4, 47, tzinfo=tzutc()))
+        rendered = self._render_partial(scoutdetail)
+        self.assertIn('Outcome not yet established', rendered)
+        self.assertIn('2026-08-28 04:47', rendered)
+
 
 # Fixed values for every field tracked by the history change-detection, so tests can
 # create history rows that differ only in the fields they explicitly override.
@@ -812,7 +865,7 @@ _TRACKED_FIELD_VALUES = {
 
 
 class ScoutDetailHistoryChangesTest(TestCase):
-    """Tests for ScoutDetailHistory.changes_from()."""
+    """Tests for ScoutDetailHistory.changes_from() and annotated_history()."""
 
     def setUp(self):
         self.target = NonSiderealTargetFactory()
@@ -838,6 +891,90 @@ class ScoutDetailHistoryChangesTest(TestCase):
                                   ra=11.0, dec=-6.0, vmag=22.0, rate=2.4,
                                   t_ephem=datetime(2026, 7, 2, tzinfo=tzutc()))
         self.assertEqual(newer.changes_from(older), {})
+
+    def test_annotated_history_newest_first_with_changes(self):
+        self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()))
+        self._history_row(datetime(2026, 7, 2, tzinfo=tzutc()), num_obs=14)
+        self._history_row(datetime(2026, 7, 3, tzinfo=tzutc()), num_obs=14, neo_score=92)
+        rows = ScoutDetailHistory.annotated_history(self.target)
+        self.assertEqual([row.last_run.day for row in rows], [3, 2, 1])
+        self.assertEqual(rows[0].changes, {'neo_score': (85, 92)})
+        self.assertEqual(rows[1].changes, {'num_obs': (10, 14)})
+        self.assertEqual(rows[2].changes, {})
+
+    def test_annotated_history_only_includes_requested_target(self):
+        self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()))
+        other_target = NonSiderealTargetFactory()
+        ScoutDetailHistoryFactory(target=other_target, last_run=datetime(2026, 7, 2, tzinfo=tzutc()))
+        rows = ScoutDetailHistory.annotated_history(self.target)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].target, self.target)
+
+
+class ScoutHistoryPartialTest(TestCase):
+    """Tests for the Scout History tab partial and its context templatetag."""
+
+    def setUp(self):
+        self.target = NonSiderealTargetFactory()
+
+    def _history_row(self, last_run, **overrides):
+        values = {**_TRACKED_FIELD_VALUES, **overrides}
+        return ScoutDetailHistoryFactory(target=self.target, last_run=last_run, **values)
+
+    def _render_history_tab(self):
+        return render_to_string('tom_jpl/partials/scouthistory_partial.html',
+                                history_tab_context({'target': self.target}))
+
+    def test_empty_history(self):
+        rendered = self._render_history_tab()
+        self.assertIn('No Scout history available', rendered)
+
+    def test_changed_cell_is_highlighted_with_previous_value(self):
+        self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()))
+        self._history_row(datetime(2026, 7, 2, tzinfo=tzutc()), neo_score=92)
+        rendered = self._render_history_tab()
+        self.assertIn('table-warning', rendered)
+        self.assertIn('was 85', rendered)
+        self.assertIn('<strong>92</strong>', rendered)
+
+    def test_ephemeris_only_changes_are_not_highlighted(self):
+        self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()), vmag=21.5, ra=10.0)
+        self._history_row(datetime(2026, 7, 2, tzinfo=tzutc()), vmag=22.0, ra=11.0)
+        rendered = self._render_history_tab()
+        self.assertNotIn('table-warning', rendered)
+
+    def test_headers_show_units_for_ca_dist_and_arc(self):
+        self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()))
+        rendered = self._render_history_tab()
+        self.assertIn('C/A dist (LD)', rendered)
+        self.assertIn('Arc (days)', rendered)
+
+    def test_arc_truncated_to_two_decimal_places(self):
+        self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()), arc=23.632083333333)
+        rendered = self._render_history_tab()
+        self.assertIn('23.63', rendered)
+        self.assertNotIn('23.632', rendered)
+
+    def test_impact_rating_uses_display_value(self):
+        self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()), impact_rating=1)
+        rendered = self._render_history_tab()
+        self.assertIn('Small', rendered)
+
+    def test_recent_changes_shown_on_details_partial(self):
+        ScoutDetailFactory(target=self.target, neo_score=92)
+        self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()))
+        self._history_row(datetime(2026, 7, 2, tzinfo=tzutc()), neo_score=92)
+        rendered = render_to_string('tom_jpl/partials/scoutdetails_partial.html',
+                                    tab_context({'target': self.target}))
+        self.assertIn('Recent changes', rendered)
+        self.assertIn('NEO Score: 85 &rarr; 92', rendered)
+
+    def test_recent_changes_omitted_when_nothing_changed(self):
+        ScoutDetailFactory(target=self.target)
+        self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()))
+        rendered = render_to_string('tom_jpl/partials/scoutdetails_partial.html',
+                                    tab_context({'target': self.target}))
+        self.assertNotIn('Recent changes', rendered)
 
 
 # Scout API signature expected by query_service().

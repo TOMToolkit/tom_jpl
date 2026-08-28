@@ -9,7 +9,7 @@
   <div class="card-body">
     <dl class="row">
         {% for key, value in scoutdetail.as_dict.items %}
-            {% if value != None and value != '' and key != 'target' and key != 'id' %}
+            {% if value != None and value != '' and key != 'target' and key != 'id' and key not in lifecycle_fields %}
                 <dt class="col-sm-6" title="{% help_text scoutdetail key %}">{% verbose_name scoutdetail key %}</dt>
                 <dd class="col-sm-6">{{ value|truncate_value_for_display }}</dd>
             {% endif %}
@@ -17,6 +17,40 @@
             No Scout details available.
         {% endfor %}
     </dl>
+    {% if scoutdetail %}
+      <h5>Outcome</h5>
+      <p>
+        {% if scoutdetail.active %}
+          <span class="badge badge-success bg-success">On Scout</span>
+        {% else %}
+          <span class="badge badge-secondary bg-secondary">Left Scout</span>
+        {% endif %}
+        {% if scoutdetail.mpc_status %}
+          {{ scoutdetail.get_mpc_status_display|capfirst }}{% if scoutdetail.mpc_reference %}
+          ({{ scoutdetail.mpc_reference }}){% endif %}{% if merged_into_target %}
+          as <a href="{% url 'targets:detail' merged_into_target.id %}" title="This submission was identified with another object; its identity lives on the linked target.">{{ merged_into_target.name }}</a>{% elif scoutdetail.merged_into %}
+          as {{ scoutdetail.merged_into }}{% endif %}
+        {% elif not scoutdetail.active %}
+          <span class="text-muted">Outcome not yet established{% if scoutdetail.mpc_status_checked %}
+            (MPC last checked {{ scoutdetail.mpc_status_checked|date:"Y-m-d H:i" }} UT){% endif %}</span>
+        {% endif %}
+      </p>
+    {% endif %}
+    {% if recent_changes %}
+      <h5>Recent changes</h5>
+      <ul class="list-unstyled">
+        {% for row in recent_changes %}
+          <li>
+            <small class="text-muted">{{ row.last_run|date:"Y-m-d H:i" }}</small>
+            <ul class="list-unstyled ml-3">
+              {% for field, change in row.changes.items %}
+                <li>{% verbose_name row field as field_label %}{{ field_label|capfirst }}: {{ change.0|format_value:field|default_if_none:'—'|truncate_value_for_display }} &rarr; {{ change.1|format_value:field|default_if_none:'—'|truncate_value_for_display }}</li>
+              {% endfor %}
+            </ul>
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
   </div>
 
 </div>
