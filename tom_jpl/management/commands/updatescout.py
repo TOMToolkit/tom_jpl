@@ -312,6 +312,11 @@ class Command(BaseCommand):
         MPC's reason. Active candidates are considered too: an object can be designated while
         Scout still lists it, and reconciliation keeps refreshing it via its trksub alias
         until the roster drops it.
+
+        Candidates are matched against the page by ``Target.name`` and every alias, and
+        finally by the designation itself: a target that an admin or another process has
+        already renamed to its IAU designation without settling ``mpc_status`` is thereby
+        recognized and settled in place instead of being retried as unlisted forever.
         """
         from tom_targets.models import Target, TargetName
 
@@ -327,14 +332,25 @@ class Command(BaseCommand):
 
         now = datetime.now(timezone.utc)
         pending = list(
-            ScoutDetail.objects.filter(mpc_status__isnull=True).select_related('target')
+            ScoutDetail.objects.filter(mpc_status__isnull=True)
+            .select_related('target').prefetch_related('target__aliases')
         )
+
+        # The departure records are keyed by trksub. A target that an admin or another
+        # pipeline has already renamed to its IAU designation (without settling
+        # ``mpc_status``) can only be recognized the other way round, by the designation.
+        by_designation = {
+            row['designation']: row for row in departures.values() if row['designation']
+        }
 
         renamed = settled = linked = 0
         unlisted = []
         for scout_detail in pending:
             target = scout_detail.target
-            row = departures.get(target.name)
+            names = [target.name] + [alias.name for alias in target.aliases.all()]
+            row = next((departures[name] for name in names if name in departures), None)
+            if row is None:
+                row = next((by_designation[name] for name in names if name in by_designation), None)
             if row is None:
                 if not scout_detail.active:
                     unlisted.append(target.name)
@@ -350,6 +366,18 @@ class Command(BaseCommand):
                 continue
 
             iau_desig = row['designation']
+            if target.name == iau_desig:
+                # Already renamed by an admin or another pipeline; the outcome just needs
+                # recording -- the rename path would alias the target to its own name.
+                settled += 1
+                if dry_run:
+                    self.stdout.write(
+                        f'  [dry-run] would settle {target.name} (already carries its designation)')
+                else:
+                    self._settle(scout_detail, row, now)
+                    self.stdout.write(f'  {target.name} already carries its designation; outcome recorded.')
+                continue
+
             claimed = (
                 Target.objects.filter(name=iau_desig).exclude(pk=target.pk).exists()
                 or TargetName.objects.filter(name=iau_desig).exclude(target=target).exists()

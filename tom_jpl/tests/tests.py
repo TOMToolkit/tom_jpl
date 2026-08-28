@@ -1394,6 +1394,46 @@ class TestUpdateDesignations(TestCase):
         self.assertEqual(aliases, ['A11Df9S'])
 
     @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_already_renamed_target_is_settled_via_its_trksub_alias(self, mock_fetch):
+        # An admin or another pipeline renamed the target to its designation (keeping the
+        # trksub as an alias) without settling mpc_status. The departure feed is keyed by
+        # trksub, so the alias is what identifies it; the outcome is recorded without
+        # re-renaming or aliasing the target to its own name.
+        self.target.name = '2026 LX'
+        self.target.save()
+        TargetName.objects.create(target=self.target, name='A11Df9S')
+        mock_fetch.return_value = {
+            'A11Df9S': make_departure_row(designation='2026 LX', reference='MPEC 2026-L12')}
+
+        self.command._update_designations(dry_run=False)
+
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, '2026 LX')
+        aliases = list(TargetName.objects.filter(target=self.target).values_list('name', flat=True))
+        self.assertEqual(aliases, ['A11Df9S'])
+        self.scout_detail.refresh_from_db()
+        self.assertEqual(self.scout_detail.mpc_status, 'designated')
+        self.assertEqual(self.scout_detail.mpc_reference, 'MPEC 2026-L12')
+        self.assertIsNone(self.scout_detail.merged_into)
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_already_renamed_target_without_alias_is_settled_by_designation(self, mock_fetch):
+        # The same manual rename, but the trksub was not kept as an alias, so no name on
+        # the target matches a feed key. The designation itself is the only remaining
+        # handle; without the reverse lookup this candidate would be retried forever.
+        self.target.name = '2026 LX'
+        self.target.save()
+        mock_fetch.return_value = {'A11Df9S': make_departure_row(designation='2026 LX')}
+
+        self.command._update_designations(dry_run=False)
+
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, '2026 LX')
+        self.assertFalse(TargetName.objects.filter(target=self.target).exists())
+        self.scout_detail.refresh_from_db()
+        self.assertEqual(self.scout_detail.mpc_status, 'designated')
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
     def test_lost_candidate_settles_with_its_reason(self, mock_fetch):
         mock_fetch.return_value = {'A11Df9S': make_departure_row(status='lost')}
 
