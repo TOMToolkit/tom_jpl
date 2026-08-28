@@ -1,7 +1,7 @@
 # JPL TOM Dataservice Module
 
-This module adds JPL [SCOUT](https://cneos.jpl.nasa.gov/scout/intro.html) support to the TOM
-Toolkit. Using this module TOMs can query SCOUT NEO Candidate data.
+This module adds JPL [Scout](https://cneos.jpl.nasa.gov/scout/intro.html) support to the TOM
+Toolkit. Using this module TOMs can query Scout NEO Candidate data.
 
 `tom_jpl` provides the following features to the TOM Toolkit:
 
