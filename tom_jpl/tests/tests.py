@@ -1,14 +1,27 @@
 from datetime import datetime
+from io import StringIO
+
+import requests
 from dateutil.tz import tzutc
 
+from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase, RequestFactory
 from django.template.loader import render_to_string
 from django.contrib.auth.models import AnonymousUser
 from unittest import mock
 
 from tom_jpl.jpl import ScoutDataService, ScoutDetail
-from tom_jpl.tests.factories import ScoutDetailFactory
-from tom_targets.models import Target
+from tom_jpl.management.commands.updatescout import Command, _fetch_mpc_departures, _parse_departures
+from tom_jpl.models import ScoutDetailHistory
+from tom_jpl.templatetags.scoutdetail_extras import history_tab_context, tab_context
+from tom_jpl.tests.factories import NonSiderealTargetFactory, ScoutDetailFactory, ScoutDetailHistoryFactory
+from tom_targets.models import Target, TargetName
+
+
+def make_departure_row(status='designated', designation=None, reference=None, merged_into=None):
+    """Build one value of the normalized outcome dict `_parse_departures` returns."""
+    return {'status': status, 'designation': designation, 'reference': reference,
+            'merged_into': merged_into}
 
 
 def make_result(overrides=None):
@@ -27,6 +40,11 @@ def make_result(overrides=None):
         'arc': '0.35',
         'nObs': 4,
         'rmsN': '0.12',
+        'Vmag': '20.8',
+        'rate': '1.9',
+        'ra': '08:54',
+        'dec': '+28',
+        'tEphem': '2026-02-11 16:30',
         'lastRun': '2026-02-11 22:45',
     }
     if overrides:
@@ -69,6 +87,21 @@ class TestGetFilterThresholds(SimpleTestCase):
         if overrides:
             params.update(overrides)
         self.ds.input_parameters = params
+
+    def test_never_set_input_parameters_returns_permissive_defaults(self):
+        """A fresh ScoutDataService (input_parameters never assigned by build_query_parameters,
+        e.g. a DataServiceQuery.parameters blob saved/edited without a 'neo_score_min' key) must
+        not raise AttributeError/KeyError -- it should behave the same as all-None thresholds.
+        """
+        thresholds = self.ds._get_filter_thresholds()
+
+        self.assertEqual(thresholds['neo_score_min'], 0)
+        self.assertEqual(thresholds['pha_score_min'], 0)
+        self.assertEqual(thresholds['geo_score_max'], 101)
+        self.assertEqual(thresholds['pos_unc_min'], 0)
+        self.assertEqual(thresholds['pos_unc_max'], 360 * 60)
+        self.assertIsNone(thresholds['impact_rating_min'])
+        self.assertIsNone(thresholds['ca_dist_min'])
 
     def test_all_none_returns_permissive_defaults(self):
         """When all optional params are None, defaults should allow everything through."""
@@ -343,6 +376,45 @@ class TestQueryTargetsFiltering(TestCase):
         self.assertEqual(targets[0]['objectName'], 'ZTF10BL')
 
 
+class TestParseRaToDegrees(SimpleTestCase):
+    """Tests for ScoutDataService._parse_ra_to_degrees(), backed by astropy.coordinates.Angle."""
+
+    def test_none_returns_none(self):
+        self.assertIsNone(ScoutDataService._parse_ra_to_degrees(None))
+
+    def test_hours_minutes(self):
+        self.assertAlmostEqual(ScoutDataService._parse_ra_to_degrees('08:54'), 133.5)
+
+    def test_hours_minutes_seconds(self):
+        self.assertAlmostEqual(ScoutDataService._parse_ra_to_degrees('08:54:30'), 133.625)
+
+    def test_malformed_string_returns_none(self):
+        self.assertIsNone(ScoutDataService._parse_ra_to_degrees('garbage'))
+
+    def test_out_of_range_hours_returns_none(self):
+        # Scout should never send this, but a bogus value must be rejected rather than
+        # silently producing an RA past 360 degrees.
+        self.assertIsNone(ScoutDataService._parse_ra_to_degrees('25:00'))
+
+
+class TestParseUtcDatetime(SimpleTestCase):
+    """Tests for ScoutDataService._parse_utc_datetime(), backed by django.utils.timezone.make_aware."""
+
+    def test_none_returns_none(self):
+        self.assertIsNone(ScoutDataService._parse_utc_datetime(None))
+
+    def test_naive_string_is_attached_utc(self):
+        # This is the real Scout format: no offset in the string at all.
+        result = ScoutDataService._parse_utc_datetime('2026-02-11 16:30')
+        self.assertEqual(result, datetime(2026, 2, 11, 16, 30, tzinfo=tzutc()))
+
+    def test_already_offset_string_raises_instead_of_silently_mislabeling(self):
+        # Scout has never sent this, but if it ever did, blindly relabeling '16:30-05:00' as
+        # '16:30 UTC' (5 hours off from the true instant) must not pass silently.
+        with self.assertRaises(ValueError):
+            ScoutDataService._parse_utc_datetime('2026-02-11T16:30:00-05:00')
+
+
 class TestParseDetailData(SimpleTestCase):
     """Tests for ScoutDataService._parse_detail_data()"""
 
@@ -356,7 +428,8 @@ class TestParseDetailData(SimpleTestCase):
         self.assertIsInstance(reduced_datums, dict)
 
         expected_keys = ['num_obs', 'neo_score', 'neo1km_score', 'pha_score', 'ieo_score', 'geocentric_score',
-                         'impact_rating', 'ca_dist', 'arc', 'rms', 'uncertainty', 'uncertainty_p1', 'last_run']
+                         'impact_rating', 'ca_dist', 'arc', 'rms', 'uncertainty', 'uncertainty_p1', 'vmag', 'rate',
+                         'ra', 'dec', 't_ephem', 'last_run']
 
         for datum in reduced_datums:
             self.assertTrue(datum in expected_keys)
@@ -377,10 +450,15 @@ class TestParseDetailData(SimpleTestCase):
                            'geocentric_score': 1,
                            'impact_rating': 2,
                            'ca_dist': 0.98,
-                           'arc': 0.35,
+                           'arc': 0.35 / 24.0,  # Scout reports arc in hours; stored in days
                            'rms': 0.12,
                            'uncertainty': 1400.0,
                            'uncertainty_p1': 1500.0,
+                           'vmag': 20.8,
+                           'rate': 1.9,
+                           'ra': 133.5,  # '08:54' -> (8 + 54/60) * 15 degrees
+                           'dec': 28.0,
+                           't_ephem': datetime(2026, 2, 11, 16, 30, tzinfo=tzutc()),
                            'last_run': datetime(2026, 2, 11, 22, 45, tzinfo=tzutc())
                            }
 
@@ -388,7 +466,8 @@ class TestParseDetailData(SimpleTestCase):
 
     def test_convert_values_more_nones(self):
         detail_data = make_result_with_orbits({'rmsN': None, 'unc': None, 'uncP1': None, 'caDist': None,
-                                               'lastRun': None, 'arc': None})
+                                               'lastRun': None, 'arc': None, 'Vmag': None, 'rate': None,
+                                               'ra': None, 'dec': None, 'tEphem': None})
 
         reduced_datums = self.ds._parse_detail_data(detail_data)
 
@@ -404,10 +483,27 @@ class TestParseDetailData(SimpleTestCase):
                            'rms': None,
                            'uncertainty': None,
                            'uncertainty_p1': None,
+                           'vmag': None,
+                           'rate': None,
+                           'ra': None,
+                           'dec': None,
+                           't_ephem': None,
                            'last_run': None
                            }
 
         self.assertDictEqual(reduced_datums, expected_datums)
+
+    def test_malformed_numeric_fields_return_none_not_raise(self):
+        """A present-but-non-numeric value (e.g. a status placeholder instead of a number) must
+        degrade to None like a missing value would, not raise and abort the whole ingest/reconcile.
+        """
+        detail_data = make_result_with_orbits({'rmsN': 'n/a', 'unc': 'n/a', 'uncP1': 'n/a', 'caDist': 'n/a',
+                                               'arc': 'n/a', 'Vmag': 'n/a', 'rate': 'n/a', 'dec': 'n/a'})
+
+        reduced_datums = self.ds._parse_detail_data(detail_data)
+
+        for field in ('rms', 'uncertainty', 'uncertainty_p1', 'ca_dist', 'arc', 'vmag', 'rate', 'dec'):
+            self.assertIsNone(reduced_datums[field], f'{field} should be None for a malformed input')
 
 
 class TestScoutDataService(TestCase):
@@ -482,7 +578,7 @@ class TestScoutDataService(TestCase):
                                'rmsN': '0.12',
                                'signature': {'source': 'NASA/JPL Scout API', 'version': '1.3'},
                                'lastRun': '2026-02-08 13:52',
-                               'neoScore': 100},]
+                               'neoScore': 100}, ]
 
         target_params = {'name': 'ZTF10BL',
                          'type': 'NON_SIDEREAL',
@@ -524,6 +620,19 @@ class TestScoutDataService(TestCase):
 
         self.assertEqual(parameters, expected_parameters)
         self.assertEqual(self.jpl_ds.input_parameters, self.input_parameters)
+
+    def test_build_query_parameters_from_target(self):
+        """build_query_parameters_from_target keys the query on the target's Scout designation
+        and its output is understood by build_query_parameters, e.g. for re-querying a single
+        already-ingested target.
+        """
+        query_parameters = self.jpl_ds.build_query_parameters_from_target(self.test_target)
+
+        self.assertEqual(query_parameters, {'tdes': 'ZTF10BL'})
+        self.assertEqual(
+            self.jpl_ds.build_query_parameters(query_parameters),
+            {'tdes': 'ZTF10BL', 'orbits': 1, 'n-orbits': 1},
+        )
 
     @mock.patch('tom_jpl.jpl.ScoutDataService.query_service')
     def test_query_targets_single(self, mock_client):
@@ -621,6 +730,11 @@ class TestScoutDataService(TestCase):
         self.assertEqual(target.scout_detail.rms, scout_detail['rms'])
         self.assertEqual(target.scout_detail.uncertainty, scout_detail['uncertainty'])
         self.assertEqual(target.scout_detail.uncertainty_p1, scout_detail['uncertainty_p1'])
+        self.assertEqual(target.scout_detail.vmag, scout_detail['vmag'])
+        self.assertEqual(target.scout_detail.rate, scout_detail['rate'])
+        self.assertEqual(target.scout_detail.ra, scout_detail['ra'])
+        self.assertEqual(target.scout_detail.dec, scout_detail['dec'])
+        self.assertEqual(target.scout_detail.t_ephem, scout_detail['t_ephem'])
         self.assertEqual(target.scout_detail.last_run, scout_detail['last_run'])
 
     def test_update_existing_target_from_query(self):
@@ -647,13 +761,28 @@ class TestScoutDataService(TestCase):
         self.assertNotAlmostEqual(target.eccentricity, existing_target.eccentricity, places=2)
         self.assertNotAlmostEqual(target.mean_anomaly, existing_target.mean_anomaly, places=2)
 
+    def test_to_target_does_not_resurrect_inactive_existing_scout_detail(self):
+        """A stale target_result (e.g. a cached interactive query result submitted well after
+        the query ran) must not silently reactivate a candidate that updatescout's reconciliation
+        has already determined has left Scout -- only ScoutDetail *creation* should default
+        active=True; updating an existing row must leave active as-is.
+        """
+        ScoutDetail.objects.create(target=self.test_target, active=False)
+
+        with mock.patch('tom_dataservices.dataservices.messages'):
+            target_data = self.scout_results[0].copy()
+            target_data['scout_detail'] = self.jpl_ds._parse_detail_data(target_data)
+            self.jpl_ds.to_target(target_data)
+
+        self.assertFalse(ScoutDetail.objects.get(target=self.test_target).active)
+
 
 class ScoutDetailsPartialTest(TestCase):
 
     def _render_partial(self, scoutdetail):
         return render_to_string(
             'tom_jpl/partials/scoutdetails_partial.html',
-            {'scoutdetail': scoutdetail}
+            tab_context({'target': scoutdetail.target})
         )
 
     def test_excludes_none_values(self):
@@ -672,3 +801,819 @@ class ScoutDetailsPartialTest(TestCase):
         rendered = self._render_partial(scoutdetail)
         self.assertIn('NEO', rendered)
         self.assertIn('78', rendered)
+
+    def test_lifecycle_fields_are_not_listed_as_raw_rows(self):
+        # The lifecycle fields render as the Outcome section, not as generic dict rows.
+        scoutdetail = ScoutDetailFactory(
+            active=False, mpc_status='designated', mpc_reference='MPEC 2026-L12',
+            mpc_status_checked=datetime(2026, 8, 28, tzinfo=tzutc()))
+        rendered = self._render_partial(scoutdetail)
+        self.assertNotIn('mpc status', rendered)
+        self.assertNotIn('merged into', rendered)
+        self.assertNotIn('active', rendered)
+
+    def test_active_candidate_shows_on_scout_badge(self):
+        scoutdetail = ScoutDetailFactory(active=True)
+        rendered = self._render_partial(scoutdetail)
+        self.assertIn('On Scout', rendered)
+        self.assertNotIn('Left Scout', rendered)
+
+    def test_designated_outcome_shows_status_and_reference(self):
+        scoutdetail = ScoutDetailFactory(active=False, mpc_status='designated',
+                                         mpc_reference='MPEC 2026-L12')
+        rendered = self._render_partial(scoutdetail)
+        self.assertIn('Left Scout', rendered)
+        self.assertIn('Received an IAU designation', rendered)
+        self.assertIn('(MPEC 2026-L12)', rendered)
+
+    def test_lost_outcome_shows_reason(self):
+        scoutdetail = ScoutDetailFactory(active=False, mpc_status='lost')
+        rendered = self._render_partial(scoutdetail)
+        self.assertIn('Was not confirmed', rendered)
+
+    def test_merged_into_links_to_the_surviving_target(self):
+        survivor = Target.objects.create(name='2026 LX', type=Target.NON_SIDEREAL)
+        scoutdetail = ScoutDetailFactory(active=False, mpc_status='designated',
+                                         merged_into='2026 LX')
+        rendered = self._render_partial(scoutdetail)
+        self.assertIn(f'/targets/{survivor.id}/', rendered)
+        self.assertIn('2026 LX</a>', rendered)
+
+    def test_unresolvable_merged_into_falls_back_to_plain_text(self):
+        scoutdetail = ScoutDetailFactory(active=False, mpc_status='designated',
+                                         merged_into='2026 ZZ9')
+        rendered = self._render_partial(scoutdetail)
+        self.assertIn('2026 ZZ9', rendered)
+        self.assertNotIn('2026 ZZ9</a>', rendered)
+
+    def test_departed_but_unsettled_candidate_shows_pending_outcome(self):
+        scoutdetail = ScoutDetailFactory(
+            active=False, mpc_status=None,
+            mpc_status_checked=datetime(2026, 8, 28, 4, 47, tzinfo=tzutc()))
+        rendered = self._render_partial(scoutdetail)
+        self.assertIn('Outcome not yet established', rendered)
+        self.assertIn('2026-08-28 04:47', rendered)
+
+
+# Fixed values for every field tracked by the history change-detection, so tests can
+# create history rows that differ only in the fields they explicitly override.
+_TRACKED_FIELD_VALUES = {
+    'num_obs': 10, 'neo_score': 85, 'neo1km_score': 5, 'pha_score': 20, 'ieo_score': 0,
+    'geocentric_score': 1, 'impact_rating': 1, 'ca_dist': 3.5, 'arc': 2.8, 'rms': 0.42,
+    'uncertainty': 25.0, 'uncertainty_p1': 40.0,
+}
+
+
+class ScoutDetailHistoryChangesTest(TestCase):
+    """Tests for ScoutDetailHistory.changes_from() and annotated_history()."""
+
+    def setUp(self):
+        self.target = NonSiderealTargetFactory()
+
+    def _history_row(self, last_run, **overrides):
+        values = {**_TRACKED_FIELD_VALUES, **overrides}
+        return ScoutDetailHistoryFactory(target=self.target, last_run=last_run, **values)
+
+    def test_no_previous_row_yields_no_changes(self):
+        row = self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()))
+        self.assertEqual(row.changes_from(None), {})
+
+    def test_detects_changed_tracked_fields(self):
+        older = self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()))
+        newer = self._history_row(datetime(2026, 7, 2, tzinfo=tzutc()), neo_score=92, rms=0.38)
+        self.assertEqual(newer.changes_from(older), {'neo_score': (85, 92), 'rms': (0.42, 0.38)})
+
+    def test_ignores_ephemeris_and_untracked_fields(self):
+        older = self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()),
+                                  ra=10.0, dec=-5.0, vmag=21.5, rate=1.2,
+                                  t_ephem=datetime(2026, 7, 1, tzinfo=tzutc()))
+        newer = self._history_row(datetime(2026, 7, 2, tzinfo=tzutc()),
+                                  ra=11.0, dec=-6.0, vmag=22.0, rate=2.4,
+                                  t_ephem=datetime(2026, 7, 2, tzinfo=tzutc()))
+        self.assertEqual(newer.changes_from(older), {})
+
+    def test_annotated_history_newest_first_with_changes(self):
+        self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()))
+        self._history_row(datetime(2026, 7, 2, tzinfo=tzutc()), num_obs=14)
+        self._history_row(datetime(2026, 7, 3, tzinfo=tzutc()), num_obs=14, neo_score=92)
+        rows = ScoutDetailHistory.annotated_history(self.target)
+        self.assertEqual([row.last_run.day for row in rows], [3, 2, 1])
+        self.assertEqual(rows[0].changes, {'neo_score': (85, 92)})
+        self.assertEqual(rows[1].changes, {'num_obs': (10, 14)})
+        self.assertEqual(rows[2].changes, {})
+
+    def test_annotated_history_only_includes_requested_target(self):
+        self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()))
+        other_target = NonSiderealTargetFactory()
+        ScoutDetailHistoryFactory(target=other_target, last_run=datetime(2026, 7, 2, tzinfo=tzutc()))
+        rows = ScoutDetailHistory.annotated_history(self.target)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].target, self.target)
+
+
+class ScoutHistoryPartialTest(TestCase):
+    """Tests for the Scout History tab partial and its context templatetag."""
+
+    def setUp(self):
+        self.target = NonSiderealTargetFactory()
+
+    def _history_row(self, last_run, **overrides):
+        values = {**_TRACKED_FIELD_VALUES, **overrides}
+        return ScoutDetailHistoryFactory(target=self.target, last_run=last_run, **values)
+
+    def _render_history_tab(self):
+        return render_to_string('tom_jpl/partials/scouthistory_partial.html',
+                                history_tab_context({'target': self.target}))
+
+    def test_empty_history(self):
+        rendered = self._render_history_tab()
+        self.assertIn('No Scout history available', rendered)
+
+    def test_changed_cell_is_highlighted_with_previous_value(self):
+        self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()))
+        self._history_row(datetime(2026, 7, 2, tzinfo=tzutc()), neo_score=92)
+        rendered = self._render_history_tab()
+        self.assertIn('table-warning', rendered)
+        self.assertIn('was 85', rendered)
+        self.assertIn('<strong>92</strong>', rendered)
+
+    def test_ephemeris_only_changes_are_not_highlighted(self):
+        self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()), vmag=21.5, ra=10.0)
+        self._history_row(datetime(2026, 7, 2, tzinfo=tzutc()), vmag=22.0, ra=11.0)
+        rendered = self._render_history_tab()
+        self.assertNotIn('table-warning', rendered)
+
+    def test_headers_show_units_for_ca_dist_and_arc(self):
+        self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()))
+        rendered = self._render_history_tab()
+        self.assertIn('C/A dist (LD)', rendered)
+        self.assertIn('Arc (days)', rendered)
+
+    def test_arc_truncated_to_two_decimal_places(self):
+        self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()), arc=23.632083333333)
+        rendered = self._render_history_tab()
+        self.assertIn('23.63', rendered)
+        self.assertNotIn('23.632', rendered)
+
+    def test_impact_rating_uses_display_value(self):
+        self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()), impact_rating=1)
+        rendered = self._render_history_tab()
+        self.assertIn('Small', rendered)
+
+    def test_recent_changes_shown_on_details_partial(self):
+        ScoutDetailFactory(target=self.target, neo_score=92)
+        self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()))
+        self._history_row(datetime(2026, 7, 2, tzinfo=tzutc()), neo_score=92)
+        rendered = render_to_string('tom_jpl/partials/scoutdetails_partial.html',
+                                    tab_context({'target': self.target}))
+        self.assertIn('Recent changes', rendered)
+        self.assertIn('NEO Score: 85 &rarr; 92', rendered)
+
+    def test_recent_changes_omitted_when_nothing_changed(self):
+        ScoutDetailFactory(target=self.target)
+        self._history_row(datetime(2026, 7, 1, tzinfo=tzutc()))
+        rendered = render_to_string('tom_jpl/partials/scoutdetails_partial.html',
+                                    tab_context({'target': self.target}))
+        self.assertNotIn('Recent changes', rendered)
+
+
+# Scout API signature expected by query_service().
+_SCOUT_SIGNATURE = {'source': 'NASA/JPL Scout API', 'version': '1.3'}
+
+# A baseline form-parameter set with permissive thresholds (nothing excluded at the
+# summary stage), mirroring the defaults produced by ScoutForm.
+_PERMISSIVE_INPUT_PARAMETERS = {
+    'ca_dist_min': None, 'data_service': 'Scout', 'geo_score_max': 5,
+    'impact_rating_min': None, 'neo_score_min': None, 'pha_score_min': None,
+    'pos_unc_max': None, 'pos_unc_min': None, 'query_name': '', 'query_save': False,
+    'tdes': '',
+}
+
+
+def make_scout_api_get(summary_data, detail_data):
+    """Build a ``requests.get`` replacement for the Scout API.
+
+    The summary (list) query is answered with ``summary_data`` (the objects that go
+    in the ``data`` array); the per-object query (identified by a ``tdes`` parameter)
+    is answered with ``detail_data``. Both responses carry the expected signature.
+    """
+    summary_payload = {'signature': _SCOUT_SIGNATURE, 'count': len(summary_data), 'data': summary_data}
+
+    def _get(url, data=None, **kwargs):
+        if data and data.get('tdes'):
+            payload = dict(detail_data, signature=_SCOUT_SIGNATURE)
+        else:
+            payload = summary_payload
+        response = mock.Mock()
+        response.json.return_value = payload
+        return response
+
+    return _get
+
+
+class TestScoutIngestionFromMockedApi(TestCase):
+    """End-to-end ingest test that mocks the Scout API at the HTTP boundary.
+
+    Patching ``requests.get`` lets the real ``query_service`` -> ``query_targets`` ->
+    ``to_target`` chain run (signature check, summary/per-object branching, field
+    parsing and the ScoutDetail DB write), guarding the parse seams that the unit
+    tests mock away: arc hours -> days, sexagesimal RA -> degrees, and tEphem.
+    """
+
+    # Detail overrides that make the parsed candidate satisfy the Rubin ToO Section 2.1
+    # filters (rating >= 3, nObs > 5, arc > 1 hr, Vmag > 21.6 North).
+    RUBIN_PASSING_OVERRIDES = {'rating': 4, 'nObs': 8, 'arc': '2.0', 'Vmag': '21.9'}
+
+    def setUp(self):
+        self.ds = ScoutDataService()
+        self.factory = RequestFactory()
+
+    def _ingest(self, summary_obj, detail_obj):
+        """Run the full mocked-API ingest and return the created target(s)."""
+        fake_get = make_scout_api_get([summary_obj], detail_obj)
+        with mock.patch('tom_jpl.jpl.requests.get', side_effect=fake_get):
+            targets_data = self.ds.query_targets(dict(_PERMISSIVE_INPUT_PARAMETERS))
+
+        request = self.factory.get('/')
+        request.user = AnonymousUser()
+        created = []
+        with mock.patch('tom_dataservices.dataservices.messages'):
+            for target_data in targets_data:
+                created.append(self.ds.to_target(target_data, request=request))
+        return targets_data, created
+
+    def test_ingests_candidate_and_parses_detail_fields(self):
+        summary_obj = make_result(self.RUBIN_PASSING_OVERRIDES)
+        detail_obj = make_result_with_orbits(self.RUBIN_PASSING_OVERRIDES)
+
+        targets_data, created = self._ingest(summary_obj, detail_obj)
+
+        self.assertEqual(len(targets_data), 1)
+        self.assertEqual(Target.objects.count(), 1)
+        self.assertEqual(ScoutDetail.objects.count(), 1)
+
+        sd = created[0].scout_detail
+        self.assertEqual(sd.num_obs, 8)
+        self.assertAlmostEqual(sd.arc, 2.0 / 24.0)   # Scout reports hours; stored in days
+        self.assertAlmostEqual(sd.ra, 133.5)          # '08:54' sexagesimal -> degrees
+        self.assertEqual(sd.dec, 28.0)
+        self.assertAlmostEqual(sd.vmag, 21.9)
+        self.assertAlmostEqual(sd.rate, 1.9)
+        self.assertEqual(sd.t_ephem, datetime(2026, 2, 11, 16, 30, tzinfo=tzutc()))
+
+    def test_candidate_excluded_at_summary_stage_creates_nothing(self):
+        # A high geocentric score is rejected by the summary filter (geo_score_max=5),
+        # so no per-object fetch happens and no Target/ScoutDetail is created.
+        summary_obj = make_result(dict(self.RUBIN_PASSING_OVERRIDES, geocentricScore=42))
+        detail_obj = make_result_with_orbits(self.RUBIN_PASSING_OVERRIDES)
+
+        targets_data, created = self._ingest(summary_obj, detail_obj)
+
+        self.assertEqual(targets_data, [])
+        self.assertEqual(Target.objects.count(), 0)
+        self.assertEqual(ScoutDetail.objects.count(), 0)
+
+    def test_history_row_created_on_ingest(self):
+        summary_obj = make_result(self.RUBIN_PASSING_OVERRIDES)
+        detail_obj = make_result_with_orbits(self.RUBIN_PASSING_OVERRIDES)
+
+        _, created = self._ingest(summary_obj, detail_obj)
+
+        self.assertEqual(ScoutDetailHistory.objects.count(), 1)
+        h = created[0].scout_detail_history.get()
+        self.assertEqual(h.last_run, datetime(2026, 2, 11, 22, 45, tzinfo=tzutc()))
+        self.assertEqual(h.num_obs, 8)
+        self.assertAlmostEqual(h.arc, 2.0 / 24.0)
+        self.assertAlmostEqual(h.vmag, 21.9)
+        # A freshly-ingested candidate is marked active on its current-state row.
+        self.assertTrue(created[0].scout_detail.active)
+
+    def test_history_not_duplicated_on_second_ingest_with_same_last_run(self):
+        # Ingesting the same Scout recomputation twice must produce exactly one history row.
+        summary_obj = make_result(self.RUBIN_PASSING_OVERRIDES)
+        detail_obj = make_result_with_orbits(self.RUBIN_PASSING_OVERRIDES)
+
+        self._ingest(summary_obj, detail_obj)
+        self._ingest(summary_obj, detail_obj)
+
+        self.assertEqual(ScoutDetailHistory.objects.count(), 1)
+
+
+class TestUpdateScoutCommand(TestCase):
+    """The ``updatescout`` management command reconciles already-ingested Scout candidates.
+
+    Ingestion of *new* candidates now goes through tom_dataservices' ``rundataquery``
+    against a saved Scout ``DataServiceQuery``; this command only re-checks candidates
+    already marked ``active``. Membership comes from one unconstrained Scout call: the API
+    applies no cuts of its own, so the roster it returns is the whole NEOCP and absence from
+    it means the object has genuinely left. A per-object call follows only for candidates
+    Scout has actually recomputed, because the orbital elements ``to_target`` updates are not
+    in a roster row.
+    """
+
+    RUBIN_PASSING_OVERRIDES = {'rating': 4, 'nObs': 8, 'arc': '2.0', 'Vmag': '21.9'}
+
+    def _run(self, tdes_response, roster=None, **opts):
+        """Run the command with ``requests.get`` patched to answer both Scout call shapes.
+
+        The unconstrained roster call is answered with ``roster``; by default that is a list
+        holding just this candidate when it is still on Scout, or one unrelated object when it
+        is not -- an *empty* roster means a failed fetch rather than a mass departure, and is
+        guarded separately. A tdes-keyed call is answered with ``tdes_response``.
+        """
+        if roster is None:
+            roster = [make_result()] if tdes_response is not None else [make_result({'objectName': 'OTHER01'})]
+
+        def fake_get(url, data=None, **kwargs):
+            response = mock.Mock()
+            if data and data.get('tdes'):
+                if tdes_response is None:
+                    response.json.return_value = {'error': 'Object not found'}
+                else:
+                    response.json.return_value = dict(tdes_response, signature=_SCOUT_SIGNATURE)
+            else:
+                response.json.return_value = {
+                    'signature': _SCOUT_SIGNATURE, 'count': len(roster), 'data': roster,
+                }
+            return response
+
+        out = StringIO()
+        with mock.patch('tom_jpl.jpl.requests.get', side_effect=fake_get):
+            call_command('updatescout', stdout=out, **opts)
+        return out.getvalue()
+
+    def test_still_active_candidate_is_refreshed(self):
+        # last_run=None means we have no stored timestamp, so the roster row always counts as
+        # newer and the candidate is refreshed -- from the roster row itself, not a re-fetch.
+        scout_detail = ScoutDetailFactory(active=True, last_run=None)
+        scout_detail.target.name = 'ZTF10BL'
+        scout_detail.target.save()
+        roster = [make_result(self.RUBIN_PASSING_OVERRIDES)]
+
+        out, calls = self._run_counting(roster, skip_designations=True)
+
+        scout_detail.refresh_from_db()
+        self.assertTrue(scout_detail.active)
+        self.assertEqual(scout_detail.num_obs, 8)
+        self.assertAlmostEqual(scout_detail.vmag, 21.9)
+        # The listing row carried every stored field, so no per-object call was needed.
+        self.assertEqual(len(calls), 1)
+
+    def test_departed_candidate_is_marked_inactive(self):
+        scout_detail = ScoutDetailFactory(active=True)
+        scout_detail.target.name = 'ZTF10BL'
+        scout_detail.target.save()
+
+        out = self._run(None, skip_designations=True)
+
+        scout_detail.refresh_from_db()
+        self.assertFalse(scout_detail.active)
+        self.assertIn('has left Scout', out)
+
+    def _run_counting(self, roster, tdes_response=None, **opts):
+        """Like ``_run`` but also returns how many Scout requests were issued."""
+        calls = []
+
+        def fake_get(url, data=None, **kwargs):
+            calls.append(dict(data or {}))
+            response = mock.Mock()
+            if data and data.get('tdes'):
+                if tdes_response is None:
+                    response.json.return_value = {'error': 'Object not found'}
+                else:
+                    response.json.return_value = dict(tdes_response, signature=_SCOUT_SIGNATURE)
+            else:
+                response.json.return_value = {
+                    'signature': _SCOUT_SIGNATURE, 'count': len(roster), 'data': roster,
+                }
+            return response
+
+        out = StringIO()
+        with mock.patch('tom_jpl.jpl.requests.get', side_effect=fake_get):
+            call_command('updatescout', stdout=out, **opts)
+        return out.getvalue(), calls
+
+    def test_unchanged_candidates_cost_a_single_request(self):
+        """The whole point of the roster diff: cost tracks churn, not the size of the pool.
+
+        Five candidates, none of which Scout has recomputed, must cost exactly one request --
+        the unconstrained roster call -- and no per-object calls at all.
+        """
+        stored_last_run = datetime(2026, 2, 11, 22, 45, tzinfo=tzutc())
+        roster = []
+        for i in range(5):
+            name = f'ZTF10B{i}'
+            detail = ScoutDetailFactory(active=True, last_run=stored_last_run)
+            detail.target.name = name
+            detail.target.save()
+            roster.append(make_result({'objectName': name}))
+
+        out, calls = self._run_counting(roster, skip_designations=True)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual([c for c in calls if c.get('tdes')], [])
+        self.assertIn('5 unchanged', out)
+
+    def test_recomputed_candidate_is_refreshed_without_extra_requests(self):
+        # One candidate has been recomputed and one has not. The recomputed one is stored from
+        # its roster row and the other is skipped -- still a single request for both.
+        stored_last_run = datetime(2026, 2, 11, 22, 45, tzinfo=tzutc())
+        for name in ('ZTF10BL', 'ZTF10BM'):
+            detail = ScoutDetailFactory(active=True, last_run=stored_last_run)
+            detail.target.name = name
+            detail.target.save()
+        roster = [
+            make_result({'objectName': 'ZTF10BL', 'lastRun': '2026-03-01 00:00', 'nObs': 8}),
+            make_result({'objectName': 'ZTF10BM'}),
+        ]
+
+        out, calls = self._run_counting(roster, skip_designations=True)
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn('1 unchanged', out)
+        self.assertEqual(ScoutDetail.objects.get(target__name='ZTF10BL').num_obs, 8)
+        self.assertEqual(ScoutDetailHistory.objects.filter(target__name='ZTF10BL').count(), 1)
+
+    def test_empty_roster_retires_nothing(self):
+        """A failed or empty fetch must never be read as "every candidate left at once"."""
+        scout_detail = ScoutDetailFactory(active=True)
+        scout_detail.target.name = 'ZTF10BL'
+        scout_detail.target.save()
+
+        out, _ = self._run_counting([], skip_designations=True)
+
+        scout_detail.refresh_from_db()
+        self.assertTrue(scout_detail.active)
+        self.assertIn('skipping reconciliation', out)
+
+    def test_truncated_roster_retires_nothing(self):
+        # Scout reports its own row count, so count != len(data) means a partial payload.
+        scout_detail = ScoutDetailFactory(active=True)
+        scout_detail.target.name = 'ZTF10BL'
+        scout_detail.target.save()
+
+        def fake_get(url, data=None, **kwargs):
+            response = mock.Mock()
+            response.json.return_value = {
+                'signature': _SCOUT_SIGNATURE, 'count': 40, 'data': [make_result({'objectName': 'OTHER01'})],
+            }
+            return response
+
+        out = StringIO()
+        with mock.patch('tom_jpl.jpl.requests.get', side_effect=fake_get):
+            call_command('updatescout', stdout=out, skip_designations=True)
+
+        scout_detail.refresh_from_db()
+        self.assertTrue(scout_detail.active)
+        self.assertIn('partial list', out.getvalue())
+
+    def test_dry_run_reconcile_writes_nothing(self):
+        scout_detail = ScoutDetailFactory(active=True)
+        scout_detail.target.name = 'ZTF10BL'
+        scout_detail.target.save()
+
+        self._run(None, skip_designations=True, dry_run=True)
+
+        scout_detail.refresh_from_db()
+        self.assertTrue(scout_detail.active)
+
+    def test_inactive_candidates_are_not_requeried(self):
+        scout_detail = ScoutDetailFactory(active=False)
+
+        with mock.patch('tom_jpl.jpl.requests.get') as mock_get:
+            call_command('updatescout', skip_designations=True, stdout=StringIO())
+
+        mock_get.assert_not_called()
+        scout_detail.refresh_from_db()
+        self.assertFalse(scout_detail.active)
+
+    def test_skip_reconcile_flag_skips_reconciliation(self):
+        with mock.patch.object(Command, '_reconcile') as mock_reconcile, \
+                mock.patch.object(Command, '_update_designations'):
+            call_command('updatescout', skip_reconcile=True, stdout=StringIO())
+
+        mock_reconcile.assert_not_called()
+
+    def test_skip_designations_flag_skips_designation_lookup(self):
+        with mock.patch.object(Command, '_reconcile'), \
+                mock.patch.object(Command, '_update_designations') as mock_update_designations:
+            call_command('updatescout', skip_designations=True, stdout=StringIO())
+
+        mock_update_designations.assert_not_called()
+
+
+class TestUpdateDesignations(TestCase):
+    """``_update_designations`` settles Scout candidates from the MPC departure feed.
+
+    The real fetch is mocked at the ``_fetch_mpc_departures`` boundary (the pluggable
+    transport), so these exercise the settlement logic: renaming to a new designation
+    (keeping the trksub as an alias), linking via ``merged_into`` when the designation is
+    already held, recording lost/dne/artificial outcomes with their reference, and the
+    terminal-state guarantee that a settled candidate is never reprocessed.
+    """
+
+    def setUp(self):
+        self.command = Command(stdout=StringIO())
+        self.scout_detail = ScoutDetailFactory(active=False)
+        self.target = self.scout_detail.target
+        self.target.name = 'A11Df9S'
+        self.target.save()
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_renames_target_and_keeps_provisional_as_alias(self, mock_fetch):
+        mock_fetch.return_value = {
+            'A11Df9S': make_departure_row(designation='2026 LX', reference='MPEC 2026-L12')}
+
+        self.command._update_designations(dry_run=False)
+
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, '2026 LX')
+        self.assertTrue(TargetName.objects.filter(name='A11Df9S', target=self.target).exists())
+        self.scout_detail.refresh_from_db()
+        self.assertEqual(self.scout_detail.mpc_status, 'designated')
+        self.assertEqual(self.scout_detail.mpc_reference, 'MPEC 2026-L12')
+        self.assertIsNone(self.scout_detail.merged_into)
+        self.assertIsNotNone(self.scout_detail.mpc_status_checked)
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_dry_run_reports_without_writing(self, mock_fetch):
+        mock_fetch.return_value = {'A11Df9S': make_departure_row(designation='2026 LX')}
+
+        self.command._update_designations(dry_run=True)
+
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, 'A11Df9S')
+        self.assertFalse(TargetName.objects.filter(name='A11Df9S').exists())
+        self.scout_detail.refresh_from_db()
+        self.assertIsNone(self.scout_detail.mpc_status)
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_ignores_targets_without_scout_detail(self, mock_fetch):
+        # A target whose name matches the feed but was never ingested via Scout.
+        other = Target.objects.create(name='A22Eg0T', type=Target.NON_SIDEREAL)
+        mock_fetch.return_value = {'A11Df9S': make_departure_row(designation='2026 LX'),
+                                   'A22Eg0T': make_departure_row(designation='2026 MY')}
+
+        self.command._update_designations(dry_run=False)
+
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, '2026 LX')
+        other.refresh_from_db()
+        self.assertEqual(other.name, 'A22Eg0T')
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_claimed_designation_links_instead_of_renaming(self, mock_fetch):
+        # Another target already carries the designation (the same body ingested under a
+        # different trksub, or independently from SBDB). The name is not copied; the
+        # settlement records which object this submission became.
+        claimant = Target.objects.create(name='2026 LX', type=Target.NON_SIDEREAL)
+        mock_fetch.return_value = {'A11Df9S': make_departure_row(designation='2026 LX')}
+
+        self.command._update_designations(dry_run=False)
+
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, 'A11Df9S')
+        self.scout_detail.refresh_from_db()
+        self.assertEqual(self.scout_detail.mpc_status, 'designated')
+        self.assertEqual(self.scout_detail.merged_into, '2026 LX')
+        self.assertEqual(self.scout_detail.resolve_merged_into(), claimant)
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_own_alias_designation_is_promoted_not_skipped(self, mock_fetch):
+        # An older updatescout recorded the designation as an alias without renaming
+        # ("old style"). That alias must not block the rename as a collision: the pair is
+        # swapped so the designation becomes the name and the trksub the alias.
+        TargetName.objects.create(target=self.target, name='2026 LX')
+        mock_fetch.return_value = {'A11Df9S': make_departure_row(designation='2026 LX')}
+
+        self.command._update_designations(dry_run=False)
+
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, '2026 LX')
+        aliases = list(TargetName.objects.filter(target=self.target).values_list('name', flat=True))
+        self.assertEqual(aliases, ['A11Df9S'])
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_already_renamed_target_is_settled_via_its_trksub_alias(self, mock_fetch):
+        # An admin or another pipeline renamed the target to its designation (keeping the
+        # trksub as an alias) without settling mpc_status. The departure feed is keyed by
+        # trksub, so the alias is what identifies it; the outcome is recorded without
+        # re-renaming or aliasing the target to its own name.
+        self.target.name = '2026 LX'
+        self.target.save()
+        TargetName.objects.create(target=self.target, name='A11Df9S')
+        mock_fetch.return_value = {
+            'A11Df9S': make_departure_row(designation='2026 LX', reference='MPEC 2026-L12')}
+
+        self.command._update_designations(dry_run=False)
+
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, '2026 LX')
+        aliases = list(TargetName.objects.filter(target=self.target).values_list('name', flat=True))
+        self.assertEqual(aliases, ['A11Df9S'])
+        self.scout_detail.refresh_from_db()
+        self.assertEqual(self.scout_detail.mpc_status, 'designated')
+        self.assertEqual(self.scout_detail.mpc_reference, 'MPEC 2026-L12')
+        self.assertIsNone(self.scout_detail.merged_into)
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_already_renamed_target_without_alias_is_settled_by_designation(self, mock_fetch):
+        # The same manual rename, but the trksub was not kept as an alias, so no name on
+        # the target matches a feed key. The designation itself is the only remaining
+        # handle; without the reverse lookup this candidate would be retried forever.
+        self.target.name = '2026 LX'
+        self.target.save()
+        mock_fetch.return_value = {'A11Df9S': make_departure_row(designation='2026 LX')}
+
+        self.command._update_designations(dry_run=False)
+
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, '2026 LX')
+        self.assertFalse(TargetName.objects.filter(target=self.target).exists())
+        self.scout_detail.refresh_from_db()
+        self.assertEqual(self.scout_detail.mpc_status, 'designated')
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_lost_candidate_settles_with_its_reason(self, mock_fetch):
+        mock_fetch.return_value = {'A11Df9S': make_departure_row(status='lost')}
+
+        self.command._update_designations(dry_run=False)
+
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, 'A11Df9S')
+        self.scout_detail.refresh_from_db()
+        self.assertEqual(self.scout_detail.mpc_status, 'lost')
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_merge_chain_outcome_records_the_surviving_identifier(self, mock_fetch):
+        # This submission was identified with another trksub which then got designated;
+        # the feed resolves the chain, and merged_into keeps the pairing.
+        mock_fetch.return_value = {'A11Df9S': make_departure_row(
+            designation='2026 LX', reference='MPEC 2026-L12', merged_into='B22Xy1Z')}
+
+        self.command._update_designations(dry_run=False)
+
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, '2026 LX')
+        self.scout_detail.refresh_from_db()
+        self.assertEqual(self.scout_detail.merged_into, 'B22Xy1Z')
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_settled_candidate_is_never_reprocessed(self, mock_fetch):
+        self.scout_detail.mpc_status = 'lost'
+        self.scout_detail.save()
+        mock_fetch.return_value = {'A11Df9S': make_departure_row(designation='2026 LX')}
+
+        self.command._update_designations(dry_run=False)
+
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, 'A11Df9S')
+        self.scout_detail.refresh_from_db()
+        self.assertEqual(self.scout_detail.mpc_status, 'lost')
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_active_candidate_can_be_designated(self, mock_fetch):
+        # The MPC can designate an object while Scout still lists it; the rename and
+        # settlement happen immediately, and reconciliation keeps matching the roster row
+        # through the trksub alias until Scout drops it.
+        self.scout_detail.active = True
+        self.scout_detail.save()
+        mock_fetch.return_value = {'A11Df9S': make_departure_row(designation='2026 LX')}
+
+        self.command._update_designations(dry_run=False)
+
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, '2026 LX')
+        self.scout_detail.refresh_from_db()
+        self.assertEqual(self.scout_detail.mpc_status, 'designated')
+        self.assertTrue(self.scout_detail.active)
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_departed_candidate_missing_from_the_page_is_stamped(self, mock_fetch):
+        # The page has outcomes, just not for this object yet: stamp the attempt so the
+        # pending state is visible, and leave it unsettled for later runs.
+        mock_fetch.return_value = {'ZZ99999': make_departure_row(status='lost')}
+
+        self.command._update_designations(dry_run=False)
+
+        self.scout_detail.refresh_from_db()
+        self.assertIsNone(self.scout_detail.mpc_status)
+        self.assertIsNotNone(self.scout_detail.mpc_status_checked)
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_fetch_failure_warns_without_raising(self, mock_fetch):
+        mock_fetch.side_effect = requests.ConnectionError('blocked')
+
+        self.command._update_designations(dry_run=False)
+
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, 'A11Df9S')
+        self.scout_detail.refresh_from_db()
+        self.assertIsNone(self.scout_detail.mpc_status_checked)
+
+    @mock.patch('tom_jpl.management.commands.updatescout._fetch_mpc_departures')
+    def test_retired_duplicate_we_never_held_becomes_an_alias_of_the_survivor(self, mock_fetch):
+        # C33Qq7Q was identified with A11Df9S and retired; we only ever ingested A11Df9S.
+        # After A11Df9S is renamed to the designation, the retired trksub is recorded as
+        # one of its aliases so both identifiers stay searchable.
+        mock_fetch.return_value = {
+            'A11Df9S': make_departure_row(designation='2026 LX'),
+            'C33Qq7Q': make_departure_row(designation='2026 LX', merged_into='A11Df9S'),
+        }
+
+        self.command._update_designations(dry_run=False)
+
+        self.target.refresh_from_db()
+        self.assertEqual(self.target.name, '2026 LX')
+        self.assertTrue(TargetName.objects.filter(name='C33Qq7Q', target=self.target).exists())
+
+
+class TestParseDepartures(SimpleTestCase):
+    """``_parse_departures`` turns the MPC 'Previous NEOCP Objects' listing into normalized
+    outcome records.
+
+    The fixture mirrors the real page: one ``<li>`` per departure, designations as
+    ``DESIG = TRKSUB (date) [see MPEC ...]`` with the reference inside anchor/italic
+    markup, comets carrying a ``Comet`` prefix, identifications as ``TRKSUB = TRKSUB``,
+    and phrase-style outcomes ('was not confirmed', 'does not exist', 'was not a minor
+    planet'). Navigation chrome and unknown line shapes must be ignored, and
+    identification chains followed to the surviving object's own outcome.
+    """
+
+    SAMPLE_HTML = """
+    <html><body>
+    <ul><li><a href="/mpec/RecentMPECs.html">Recent</a></li></ul>
+    <ul>
+    <li> 2026 QT = ST26H67 (Aug. 21.34 UT)   [see <a href="/mpec/K26/K26Q53.html"><i>MPEC</i> 2026-Q53</a>]
+    <li> Comet P/2026 P1 = P12p4Jx (Aug. 25.75 UT)   [see <a href="/mpec/K26/K26Q98.html"><i>MPEC</i> 2026-Q98</a>]
+    <li> (452639) = A11EXtc (July 28.51 UT)   [see <a href="/mpec/K26/K26O50.html"><i>MPEC</i> 2026-O50</a>]
+    <li>ST26H89 = TF26HD1 (Aug. 24.69 UT)
+    <li> 2026 QA3 = ST26H89 (Aug. 23.11 UT)   [see <a href="/mpec/K26/K26QA5.html"><i>MPEC</i> 2026-Q105</a>]
+    <li> ST26H76 was not confirmed (Aug. 27.68 UT)
+    <li> 19E0001 does not exist (June 20.19 UT)
+    <li> 6EI3621 was not a minor planet (May 19.65 UT)
+    <li>B11AAA2 = B11AAA1 (Aug. 20.00 UT)
+    <li> B11AAA2 was not confirmed (Aug. 19.00 UT)
+    <li>C11AAA1 = C11AAA2 (Aug. 20.00 UT)
+    </ul>
+    </body></html>
+    """
+
+    def test_designation_line_with_reference(self):
+        outcomes = _parse_departures(self.SAMPLE_HTML)
+        self.assertEqual(outcomes['ST26H67'], make_departure_row(
+            designation='2026 QT', reference='MPEC 2026-Q53'))
+
+    def test_comet_prefix_is_stripped_from_the_designation(self):
+        outcomes = _parse_departures(self.SAMPLE_HTML)
+        self.assertEqual(outcomes['P12p4Jx']['designation'], 'P/2026 P1')
+
+    def test_numbered_designation_keeps_mpc_rendering(self):
+        outcomes = _parse_departures(self.SAMPLE_HTML)
+        self.assertEqual(outcomes['A11EXtc']['designation'], '(452639)')
+
+    def test_outcome_phrases_map_to_status_codes(self):
+        outcomes = _parse_departures(self.SAMPLE_HTML)
+        self.assertEqual(outcomes['ST26H76'], make_departure_row(status='lost'))
+        self.assertEqual(outcomes['19E0001'], make_departure_row(status='dne'))
+        self.assertEqual(outcomes['6EI3621'], make_departure_row(status='na'))
+
+    def test_identification_chain_inherits_the_survivors_designation(self):
+        # TF26HD1 was retired into ST26H89 ('ST26H89 = TF26HD1'), and ST26H89 was then
+        # designated ('2026 QA3 = ST26H89'): the chain resolves TF26HD1 to the final
+        # designation, keeping the immediate survivor in merged_into.
+        outcomes = _parse_departures(self.SAMPLE_HTML)
+        self.assertEqual(outcomes['TF26HD1'], make_departure_row(
+            designation='2026 QA3', reference='MPEC 2026-Q105', merged_into='ST26H89'))
+        # The survivor's own record is a plain designation, with no merge involved.
+        self.assertEqual(outcomes['ST26H89'], make_departure_row(
+            designation='2026 QA3', reference='MPEC 2026-Q105'))
+
+    def test_identification_chain_inherits_a_failed_survivors_reason(self):
+        # B11AAA1 was retired into B11AAA2 ('B11AAA2 = B11AAA1'), and B11AAA2 itself was
+        # then never confirmed: the retired submission shares that fate.
+        outcomes = _parse_departures(self.SAMPLE_HTML)
+        self.assertEqual(outcomes['B11AAA1'], make_departure_row(
+            status='lost', merged_into='B11AAA2'))
+
+    def test_unresolvable_chain_yields_no_record(self):
+        # C11AAA2 was retired into C11AAA1, which the page knows nothing about
+        # (presumably still alive on the NEOCP): stay pending rather than guess.
+        outcomes = _parse_departures(self.SAMPLE_HTML)
+        self.assertNotIn('C11AAA2', outcomes)
+
+    def test_navigation_chrome_is_ignored(self):
+        outcomes = _parse_departures(self.SAMPLE_HTML)
+        self.assertNotIn('Recent', outcomes)
+
+    def test_empty_page_returns_empty_mapping(self):
+        self.assertEqual(_parse_departures('<html><body></body></html>'), {})
+
+    @mock.patch('tom_jpl.management.commands.updatescout.requests.get')
+    def test_fetch_http_error_propagates(self, mock_get):
+        response = mock.Mock()
+        response.raise_for_status.side_effect = requests.HTTPError('500')
+        mock_get.return_value = response
+
+        with self.assertRaises(requests.HTTPError):
+            _fetch_mpc_departures()

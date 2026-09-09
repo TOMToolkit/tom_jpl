@@ -1,7 +1,7 @@
 import factory
 
 from tom_targets.models import Target
-from tom_jpl.models import ScoutDetail
+from tom_jpl.models import ScoutDetail, ScoutDetailHistory
 
 
 class SiderealTargetFactory(factory.django.DjangoModelFactory):
@@ -53,4 +53,14 @@ class ScoutDetailFactory(factory.django.DjangoModelFactory):
     rms = factory.Faker('pyfloat', min_value=0, max_value=5, right_digits=2)
     uncertainty = factory.Faker('pyfloat', min_value=0, max_value=100, right_digits=2)
     uncertainty_p1 = factory.Faker('pyfloat', min_value=0, max_value=100, right_digits=2)
+    vmag = factory.Faker('pyfloat', min_value=10, max_value=25, right_digits=2)
+    rate = factory.Faker('pyfloat', min_value=0, max_value=100, right_digits=2)
+    ra = factory.Faker('pyfloat', min_value=0, max_value=360, right_digits=4)
+    dec = factory.Faker('pyfloat', min_value=-90, max_value=90, right_digits=4)
+    t_ephem = factory.Faker('date_time_this_year')
     last_run = factory.Faker('date_time_this_year')
+
+
+class ScoutDetailHistoryFactory(ScoutDetailFactory):
+    class Meta:
+        model = ScoutDetailHistory

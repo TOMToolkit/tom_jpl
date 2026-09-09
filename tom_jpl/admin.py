@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.utils.translation import gettext_lazy as _
 
-from tom_jpl.models import ScoutDetail
+from tom_jpl.models import ScoutDetail, ScoutDetailHistory
 
 
 def make_score_filter(field_name, filter_title):
@@ -130,7 +130,23 @@ ImpactRatingFilter = make_choice_filter('impact_rating', _('Impact Rating'), [
 
 @admin.register(ScoutDetail)
 class ScoutDetailAdmin(admin.ModelAdmin):
-    list_display = ('target', 'neo_score', 'pha_score', 'geocentric_score', 'impact_rating',
+    list_display = ('target', 'active', 'neo_score', 'pha_score', 'geocentric_score', 'impact_rating',
                     'ca_dist', 'uncertainty', 'uncertainty_p1', 'last_run')
     search_fields = ('target__name', )
+    list_filter = ['active', NEOScoreFilter, PHAScoreFilter, GeocentricScoreFilter, ImpactRatingFilter]
+
+
+@admin.register(ScoutDetailHistory)
+class ScoutDetailHistoryAdmin(admin.ModelAdmin):
+    list_display = ('target', 'last_run', 'neo_score', 'geocentric_score', 'impact_rating',
+                    'rms', 'num_obs', 'arc', 'vmag', 'uncertainty_p1', 'rate', 'dec')
+    search_fields = ('target__name',)
     list_filter = [NEOScoreFilter, PHAScoreFilter, GeocentricScoreFilter, ImpactRatingFilter]
+    ordering = ('target__name', 'last_run')
+    date_hierarchy = 'last_run'
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False

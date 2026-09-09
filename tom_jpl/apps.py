@@ -31,4 +31,8 @@ class TomJPLConfig(AppConfig):
         return [{'partial': f'{self.name}/partials/scoutdetails_partial.html',
                  'label': 'Scout Details',
                  'context': f'{self.name}.templatetags.scoutdetail_extras.tab_context'
+                 },
+                {'partial': f'{self.name}/partials/scouthistory_partial.html',
+                 'label': 'Scout History',
+                 'context': f'{self.name}.templatetags.scoutdetail_extras.history_tab_context'
                  }]

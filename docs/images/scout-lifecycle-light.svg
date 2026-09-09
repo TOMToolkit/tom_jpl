@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 500" width="720" height="500" role="img" aria-labelledby="t d">
+<title id="t">Life of a Scout NEO candidate in a TOM</title>
+<desc id="d">A candidate moves from the MPC NEOCP through the JPL Scout API and the rundataquery command into a Target with an active ScoutDetail. The updatescout command refreshes it from a single Scout roster call and appends each new orbit solution to ScoutDetailHistory. When the candidate is absent from the roster it is retired, and then resolves either to a renamed IAU designation or to no designation at all. Highlighted elements are added by the Rubin ToO filter fields branch.</desc>
+<defs>
+<marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#1B1F26"/></marker>
+<marker id="ara" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#A85C07"/></marker>
+</defs>
+
+<rect x="0" y="0" width="720" height="500" fill="#FFFFFF"/>
+
+<rect x="270" y="16" width="180" height="48" rx="6" fill="#F1F3F6" stroke="#C8CFD8"/>
+<text x="360" y="37" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#1B1F26">MPC NEOCP</text>
+<text x="360" y="52" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="10" fill="#5A626E">unconfirmed candidates</text>
+
+<line x1="360" y1="64" x2="360" y2="104" stroke="#C8CFD8" stroke-width="1.3" marker-end="url(#ar)"/>
+<text x="372" y="88" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="10" fill="#5A626E">tracklet submitted</text>
+
+<rect x="270" y="110" width="180" height="48" rx="6" fill="#F1F3F6" stroke="#C8CFD8"/>
+<text x="360" y="131" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#1B1F26">JPL Scout API</text>
+<text x="360" y="146" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="10" fill="#5A626E">orbit + hazard scores</text>
+
+<line x1="360" y1="158" x2="360" y2="198" stroke="#C8CFD8" stroke-width="1.3" marker-end="url(#ar)"/>
+<text x="348" y="182" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="10" fill="#5A626E">rundataquery &#183; score cuts</text>
+
+<rect x="246" y="204" width="228" height="52" rx="6" fill="#F1F3F6" stroke="#C8CFD8" stroke-width="1.4"/>
+<text x="360" y="226" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#1B1F26">Target + ScoutDetail</text>
+<text x="360" y="242" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="10.5" fill="#5A626E">active = true</text>
+
+<path d="M 246 216 L 200 216 L 200 242 L 242 242" fill="none" stroke="#A85C07" stroke-width="1.3" marker-end="url(#ara)"/>
+<text x="194" y="205" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="10" fill="#A85C07">updatescout</text>
+<text x="194" y="219" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="10" fill="#5A626E">refresh from</text>
+<text x="194" y="232" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="10" fill="#5A626E">one roster call</text>
+
+<text x="502" y="196" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="9.5" fill="#5A626E">each new lastRun</text>
+<line x1="476" y1="230" x2="526" y2="230" stroke="#A85C07" stroke-width="1.3" marker-end="url(#ara)"/>
+<rect x="530" y="204" width="174" height="52" rx="6" fill="#F9EFE0" stroke="#C9924A"/>
+<text x="617" y="226" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#1B1F26">ScoutDetailHistory</text>
+<text x="617" y="242" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="10" fill="#5A626E">append-only</text>
+
+<line x1="360" y1="256" x2="360" y2="304" stroke="#A85C07" stroke-width="1.3" marker-end="url(#ara)"/>
+<text x="372" y="284" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="10" fill="#5A626E">absent from Scout roster</text>
+
+<rect x="270" y="310" width="180" height="48" rx="6" fill="#F9EFE0" stroke="#C9924A"/>
+<text x="360" y="331" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" fill="#1B1F26">Retired</text>
+<text x="360" y="346" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="10.5" fill="#5A626E">active = false</text>
+
+<path d="M 360 358 L 360 376" fill="none" stroke="#A85C07" stroke-width="1.3"/>
+<path d="M 173 376 L 547 376" fill="none" stroke="#A85C07" stroke-width="1.3"/>
+<line x1="173" y1="376" x2="173" y2="410" stroke="#A85C07" stroke-width="1.3" marker-end="url(#ara)"/>
+<line x1="547" y1="376" x2="547" y2="410" stroke="#A85C07" stroke-width="1.3" marker-end="url(#ara)"/>
+<text x="183" y="397" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="9.5" fill="#5A626E">on MPC Previous NEOCP</text>
+<text x="537" y="397" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="9.5" fill="#5A626E">status = lost / dne / na / ns</text>
+
+<rect x="28" y="416" width="290" height="58" rx="6" fill="#F1F3F6" stroke="#C8CFD8"/>
+<text x="173" y="439" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#1B1F26">Renamed to IAU designation</text>
+<text x="173" y="456" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="10" fill="#5A626E">trksub kept as alias</text>
+
+<rect x="402" y="416" width="290" height="58" rx="6" fill="#F1F3F6" stroke="#C8CFD8"/>
+<text x="547" y="439" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#1B1F26">Never designated</text>
+<text x="547" y="456" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="10" fill="#5A626E">lost, bogus or artificial</text>
+
+<text x="360" y="492" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="9.5" fill="#5A626E">highlighted: added by the ScoutDetail lifecycle work</text>
+</svg>
